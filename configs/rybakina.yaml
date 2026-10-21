@@ -1,0 +1,86 @@
+# Pipeline configuration for one athlete. Paths are relative to the project root.
+run_dir: runs/rybakina
+
+athlete:
+  name: Elena Rybakina
+  handedness: right
+  backhand: two_handed
+  height_m: 1.84
+
+source:
+  video: Elena-Rybakina-Shots.mp4
+  youtube: https://www.youtube.com/watch?v=UP--k3gvSn8
+
+remote:
+  host: ""                  # user@gpu-host; empty = R3D_HOST from the environment or .env (kept out of the repo)
+  root: rybakina3d          # relative to the remote $HOME
+  blender: /usr/local/bin/blender
+
+models:
+  index: gemini-3.8-flash            # shot labelling over the whole compilation
+  locate: gemini-3.8-flash           # hitter bounding box on the contact frame
+  image_hero: gemini-3-pro-image     # style transfer: front hero (style + character reference slots)
+  image_views: gemini-3-pro-image    # turnaround views conditioned on the approved hero
+  mesh: fal-ai/meshy/v7.1/multi-image-to-3d
+  mesh_alt: tripo3d/h3.1/multiview-to-3d
+  rig: fal-ai/meshy/rigging
+  image_paint: openai/gpt-image-2.5/sunburst/edit   # artwork: repaint each render in the reference sheet's style (fal)
+  video_paint: fal-ai/bernini-r/reference-edit-video   # artwork motion: painted first frame carried through each clip (fal; kling/v4 edit was closed to API on 2026-10-22)
+
+shots:                     # cuts are detected on the index proxy (same frames, cheap decode)
+  adaptive_threshold: 3.0
+  min_shot_s: 0.6
+
+index:
+  proxy_height: 360
+  chunk_s: 240             # Gemini labels the compilation in windows of this length
+  fps: 2.0                 # frames per second Gemini samples inside each window
+
+select:
+  oversample: 2.0          # candidates per kept clip; `curate` rejects the ones whose motion contradicts the label
+  strokes:                 # how many clips to keep per stroke type
+    serve: 6
+    forehand: 6
+    backhand: 6
+    slice: 2
+    volley: 2
+    overhead: 1
+    celebration: 2
+  window_s:                # clip window around the contact time [before, after]
+    serve: [2.2, 1.0]
+    celebration: [0.6, 2.4]
+    default: [1.3, 1.0]
+  allowed_views: [main_broadcast, behind_low, side]
+  allow_slow_motion: false
+  min_quality: 3
+  onset_search_s: 0.5      # refine Gemini's contact time to the strongest audio onset within this radius
+
+clips:
+  model_fps: 30            # GVHMR's training rate
+  time_mode: retime        # retime: keep every source frame, declare 30fps (no duplicated frames)
+  preview_height: 720
+
+track:
+  detector: yolo11x.pt
+  conf: 0.25
+  min_coverage: 0.7
+
+motion:
+  static_motion_px: 1.5    # mean background motion per frame below which the camera counts as static
+  default_hfov_deg: 32     # broadcast telephoto when no calibration is available
+  flip_test: true
+
+character:
+  height_m: 1.84
+  target_tris: 24000
+  views: [front, left, back, right]
+
+curate:
+  keep_all: true           # review wants her full range of movement: every clip is animated, failed checks are flagged
+
+retarget:
+  ground_from_contacts: true
+  smooth_window: 5         # frames, rotation smoothing (0 = off); light so swing peaks survive
+
+site:
+  port: 8765

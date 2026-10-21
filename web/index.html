@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rybakina 3D Review</title>
+  <meta name="description" content="Review site: a stylized, rigged Elena Rybakina with a moveset recovered from broadcast footage.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23d6f03c'/%3E%3Cpath d='M5 9c6 3 6 11 0 14M27 9c-6 3-6 11 0 14' stroke='%23f4f8e6' stroke-width='2.2' fill='none'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/overview" aria-label="Rybakina 3D, overview">
+      <span class="brand-ball" aria-hidden="true"></span>
+      <span class="brand-name">Rybakina 3D</span>
+      <span class="brand-sub">review</span>
+    </a>
+    <nav class="tabs" id="tabs" aria-label="Sections">
+      <a href="#/overview" data-view="overview">Overview</a>
+      <a href="#/character" data-view="character">Character</a>
+      <a href="#/moveset" data-view="moveset">Moveset</a>
+      <a href="#/artwork" data-view="artwork">Artwork</a>
+      <a href="#/footage" data-view="footage">Footage</a>
+      <a href="#/notes" data-view="notes">Notes</a>
+    </nav>
+    <div class="build-info" id="build-info"></div>
+  </header>
+
+  <main id="main">
+    <section class="view" id="view-overview" data-view="overview" hidden></section>
+    <section class="view" id="view-character" data-view="character" hidden></section>
+    <section class="view view-wide" id="view-moveset" data-view="moveset" hidden></section>
+    <section class="view view-wide" id="view-artwork" data-view="artwork" hidden></section>
+    <section class="view" id="view-footage" data-view="footage" hidden></section>
+    <section class="view" id="view-notes" data-view="notes" hidden></section>
+    <div class="boot" id="boot">
+      <div class="spinner" aria-hidden="true"></div>
+      <p>Loading the run…</p>
+    </div>
+  </main>
+
+  <div class="lightbox" id="lightbox" hidden>
+    <figure>
+      <img alt="">
+      <video controls loop muted playsinline hidden></video>
+      <figcaption></figcaption>
+      <a class="btn small lightbox-link" href="#/moveset" hidden></a>
+    </figure>
+    <button class="btn lightbox-close" type="button">Close</button>
+  </div>
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <noscript><p class="noscript">This review site needs JavaScript (ES modules).</p></noscript>
+</body>
+</html>

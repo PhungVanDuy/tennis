@@ -1,0 +1,26 @@
+# secrets (API keys, R3D_HOST)
+.env
+
+# environments and caches
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+.DS_Store
+
+# inputs and generated data (see docs/setup.md for what to put where)
+*.mp4
+!web/**/*.mp4
+runs/
+weights/
+body_models/
+bin/
+site/
+
+# client and third-party material: never published
+*.pdf
+Screenshot*.png
+/assets/
+/naomi_style.png
