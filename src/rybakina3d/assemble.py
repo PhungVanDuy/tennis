@@ -231,6 +231,12 @@ def verify_problems(verify: dict, report: dict, expected: list[str]) -> list[str
     return problems
 
 
+def leg_settings(cfg: Config) -> dict:
+    """The job settings of retarget.leg_weights (none for "meshy", so such a job is the one from before it)."""
+    r = cfg.retarget
+    return {"leg_weights": r.leg_weights, "knee_band_cm": r.knee_band_cm} if r.leg_weights == "band" else {}
+
+
 def run(cfg: Config, only: list[str] | None = None) -> dict:
     run_ = cfg.run
     if not run_.rig.exists():
@@ -257,7 +263,8 @@ def run(cfg: Config, only: list[str] | None = None) -> dict:
                      "ground_from_contacts": cfg.retarget.ground_from_contacts, "foot_lock": FOOT_LOCK,
                      "racket": True, "weld_m": cfg.retarget.weld_m,
                      "smooth_limb_weights": cfg.retarget.smooth_limb_weights,
-                     **({"racket_colors": cfg.character.racket_colors} if cfg.character.racket_colors else {})},
+                     **({"racket_colors": cfg.character.racket_colors} if cfg.character.racket_colors else {}),
+                     **leg_settings(cfg)},
         "render": {"width": int(round(size[0] * preview_h / size[1] / 2) * 2), "height": preview_h},
         "clips": clips,
         "out": {"glb": str(run_.moveset_glb), "fbx": str(run_.moveset_fbx),

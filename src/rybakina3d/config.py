@@ -6,6 +6,7 @@ import json
 import os
 from functools import cached_property
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -109,6 +110,10 @@ class Retarget(BaseModel):
     smooth_window: int = 5
     weld_m: float = 0.0     # merge skinned-mesh vertices closer than this (m) before retargeting; 0 = keep as shipped
     smooth_limb_weights: int = 0      # Laplacian passes over the limb weights before retargeting (0 = off)
+    # leg skin weights (blender/retarget.py LEG_WEIGHTS), applied after the smoothing: "meshy" = the auto-rig's;
+    # "band" = each knee's thigh/shin split centred on the joint, knee_band_cm either side
+    leg_weights: Literal["meshy", "band"] = "meshy"
+    knee_band_cm: float = Field(5.0, gt=0)
 
 
 class Site(BaseModel):

@@ -290,7 +290,7 @@ The YAML maps one-to-one onto Pydantic models. `run_dir`, `athlete`, `source`, `
 | `clips`, `track`, `motion` | GPU stages | |
 | `character` | mesh (height, triangle budget, views, `geometry_resolution`, `mesh_primary`); `variant` (`RunLayout.out` / `stem`); `name` (`Config.display_name`); `refs_dir` (refs and stylize take the art-team path, `character/art.py`, and mesh sends the art front as Meshy's texture guide); `racket_colors` (retarget → `blender/racket.py`) | the variant keys default to `None`; `configs/rybakina.yaml` sets none of them |
 | `curate` | curate | `keep_all: false` in code vs `true` in the YAML (every clip animated, failures only flagged) |
-| `retarget` | retarget | |
+| `retarget` | retarget | the skin fixes are off in code (`weld_m: 0`, `smooth_limb_weights: 0`, `leg_weights: meshy`; `knee_band_cm: 5.0` only matters for `band`); `configs/rybakina.yaml` sets none of them, `configs/naomi.yaml` all of them |
 | `site` | serve (`port: 8765`) | |
 
 Most thresholds are module constants, not config, and are named in the module that applies them: `ACCEPT_IOU = 0.85` in `artwork/paint.py`, `OVERHEAD_MIN_RISE_M = 0.25` and `SWING_MIN_SPEED_MS = 4.0` in `curate.py`, `MIN_OK_FRACTION = 0.90` and `MAX_CLIP_REPROJ_PX = 1.5` in `camera.py`, and the QA bands in `qa.py`. When a change to code alters what a cached artwork output looks like, bump that stage's version constant (`RENDER_VERSION`, `MOTION_VERSION`, `CUT_VERSION`, `FIRST_VERSION`) so the caches invalidate. `PROFILE_VERSION` in `motion_render.py` invalidates only the `quest3` and `draft` videos (sub-frame timing, scaled pixel constants).
@@ -322,7 +322,7 @@ Four drivers run Blender headless with a JSON job (`character face` on the works
 
 | Driver | Script | Job and report |
 |---|---|---|
-| `assemble.py` (`r3d retarget`) | `blender/retarget.py` (+ `racket.py`) | `anim/job.json` → `anim/retarget.json`; a second run with `--verify` → `anim/verify.json` |
+| `assemble.py` (`r3d retarget`) | `blender/retarget.py` (+ `racket.py`) | `anim/job.json` → `anim/retarget.json`; a second run with `--verify` → `anim/verify.json`. The job's `settings` carry the skin fixes: `weld_m`, `smooth_limb_weights` and, from `assemble.leg_settings`, `leg_weights` and `knee_band_cm`. They apply in the order weld, limb smoothing, leg weights; `retarget.json` reports them under `weld` and `skin_fix` |
 | `artwork/render.py` | `blender/artwork.py` | `artwork/renders/job.json` → `artwork/renders/blender.json` |
 | `artwork/motion_render.py` | `blender/artwork_motion.py` (+ `artwork.py`) | `artwork/motion/frames/job.json` → `frames/<name>/blender.json` per video (web); `frames/<profile>/job.json` → `frames/<profile>/<name>/blender.json` for `quest3` and `draft` |
 | `character/face.py` (`r3d character face`) | `blender/face_project.py` | `character/face/job_render.json` → `render.png`, `camera.json`; then `job_bake.json` → `basecolor.png` |
@@ -347,7 +347,7 @@ The current run's reports record Blender 5.2.2 LTS, with Cycles on an NVIDIA A10
 ## Tests
 
 ```bash
-.venv/bin/pytest -q                      # 164 tests, about 25 s
+.venv/bin/pytest -q                      # 170 tests, about 25 s
 .venv/bin/ruff check src tests
 ```
 
@@ -377,6 +377,7 @@ Tests that need ffmpeg (`test_artwork_motion_render.py`, `test_artwork_motion_co
 | `test_artwork_motion_paint.py` | masks, IoU statistics, the 4k+1 plan, the frame map, video round-trip, plate and placement, flicker and drift, the judge, racket recall, fingerprints, the model guard |
 | `test_artwork_motion_compose.py` | reel timing (every contact on one frame, seamless loop), layout, paper estimate, the site's motion block; the fixed 2064 × 2208 canvas (fits without cropping, labels inside), contain-fit tiles, the variant caption, the `quest3` reel and its report, composing while the render runs |
 | `test_character_art.py` | the art-team path: request sizes, square views on one feet line, alpha cut-out; `character face`: the face oval, skin evening, detail transfer; `gltf.replace_image` |
+| `test_leg_weights.py` | the leg skin weights: the knee plane and band (leg total kept), the modes matching the config; `assemble.leg_settings` per mode, Naomi's band, the default job unchanged |
 | `test_site_variants.py` | the site's variant sections: no `variants/` folder, links to what exists, draft live until `quest3` is composed, atlas order after a partial compose, renders only and moveset only, `variants` in `site.json` |
 
 ## Adding a stage

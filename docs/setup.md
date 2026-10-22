@@ -54,7 +54,7 @@ Install:
 uv venv --python 3.12 .venv
 uv pip install -e ".[api,dev]"
 .venv/bin/r3d --help
-.venv/bin/pytest -q && .venv/bin/ruff check src tests     # 164 tests, about 25 s (see the note below)
+.venv/bin/pytest -q && .venv/bin/ruff check src tests     # 170 tests, about 25 s (see the note below)
 ```
 
 | Extra | Contents | Where |
@@ -357,6 +357,8 @@ number, a string) replaces the base's. `configs/naomi.yaml` is `extends: rybakin
 | `character.refs_dir` | `artexamplesfortennisnaomiosaka` | the art team's renders (project-relative); `character refs` and `stylize` then take the art-team path (`character/art.py`) |
 | `retarget.smooth_limb_weights` | `20` | Laplacian passes over the limb weights before retargeting (`blender/retarget.py` `smooth_limb_weights`); `0` (the default) leaves the auto-rig's weights |
 | `retarget.weld_m` | `1.0e-5` | skinned-mesh vertices closer than this (metres) are merged before retargeting (`blender/retarget.py` `weld_meshes`); the default `0` keeps the mesh as shipped (Rybakina) |
+| `retarget.leg_weights` | `band` | the leg skin weights, replaced after the limb smoothing (`blender/retarget.py` `LEG_WEIGHTS`): `band` rebuilds each knee's thigh/shin split centred on the knee joint; `meshy` (the default) keeps the auto-rig's ([character.md](character.md#5-a-character-drawn-by-the-art-team-the-naomi-variant) says why Naomi needs `band`) |
+| `retarget.knee_band_cm` | `5.0` | the band's half-width either side of the knee plane (the code default too) |
 | `character.mesh_primary` | `hi3d` | the generator whose rig becomes `character/rigged.glb` (`meshy`, `tripo`, `hunyuan` or `hi3d`) |
 | `character.racket_colors` | `frame`, `grip`, `strings` as linear RGB | the racket's colours, passed to `blender/racket.py` through the retarget job |
 | `models.mesh` | `""` | no Meshy generator for this variant |

@@ -20,3 +20,5 @@ models:
 retarget:                                    # the auto-rig's knees fold at the back when bent (docs/character.md)
   weld_m: 1.0e-5                             # Hi3D ships every triangle with its own vertices: weld them
   smooth_limb_weights: 20
+  leg_weights: band                          # each knee's thigh/shin split centred on the joint (blender/retarget.py)
+  knee_band_cm: 5.0                          # band half-width

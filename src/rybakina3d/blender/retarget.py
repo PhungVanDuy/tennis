@@ -20,6 +20,10 @@ path, so they neither slide nor sink: they sit at their rest height, the rig sta
 Between those frames the lowest foot stays between 3 cm under the floor and a per-stroke float cap.
 GVHMR's world heading follows the camera: every clip starts with the broadcast camera looking along -Y.
 The rig's armature scale (Meshy: 0.01, centimetre bones) is applied on import: the moveset is unit-scale.
+
+Before retargeting, the skin can be fixed (job settings): coincident vertices welded (weld_m), the limb weights
+smoothed (smooth_limb_weights), then the leg weights replaced (leg_weights, see LEG_WEIGHTS) last: the smoothing
+still reads the auto-rig's weights (arms and skirt stay as they were) and cannot blur the new knee band.
 """
 
 from __future__ import annotations
@@ -100,6 +104,15 @@ FLOOR_TOLERANCE_M = 0.03
 # is mostly depth drift (it cannot tell a hop from it), so one foot stays within a split-step of the court.
 MAX_FLOAT_M = {"serve": 0.5, "overhead": 0.5, "default": 0.05}
 SIDE_ELEVATION_DEG = 12.0  # check renders: pitch of the side camera
+
+# Leg skin weights (settings["leg_weights"]). Meshy's auto-rig hands each knee from thigh to shin 4-5.5 cm below the
+# joint, so in a deep bend the upper calf turns only part of the way with the shin and lags behind it.
+#   meshy        the auto-rig's weights as they are
+#   band         each knee's thigh/shin split rebuilt as a smoothstep across the plane through the knee joint
+#                (knee_plane), knee_band_cm either side of it; every vertex keeps its thigh + shin total
+LEG_WEIGHTS = ("meshy", "band")
+KNEE_BAND_CM = 5.0       # band: default half-width
+WEIGHT_EPS = 1e-5        # weights below this are dropped from a vertex group
 
 
 # --------------------------------------------------------------------------------------------- rotations
@@ -631,6 +644,25 @@ def broadcast_camera(motion: dict, frame: int, scale: float, origin: np.ndarray,
     return {"matrix": M, "fx": float(K[0, 0]), "cx": float(K[0, 2]), "cy": float(K[1, 2])}
 
 
+# ------------------------------------------------------------------------------------------ skin weights
+def knee_plane(hip: np.ndarray, knee: np.ndarray, ankle: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(point, unit normal pointing down the leg) of the plane a knee bends about: through the knee joint,
+    perpendicular to the bisector of the thigh (hip -> knee) and shin (knee -> ankle) directions."""
+    hip, knee, ankle = (np.asarray(p, np.float64) for p in (hip, knee, ankle))
+    n = (knee - hip) / np.linalg.norm(knee - hip) + (ankle - knee) / np.linalg.norm(ankle - knee)
+    return knee, n / np.linalg.norm(n)
+
+
+def knee_band(co: np.ndarray, w_thigh: np.ndarray, w_shin: np.ndarray, point: np.ndarray, normal: np.ndarray,
+              half: float) -> tuple[np.ndarray, np.ndarray]:
+    """Thigh and shin weights split by a smoothstep across `half` (m) either side of the knee plane, half and
+    half on it; each vertex keeps its thigh + shin total, so the hip and ankle blends stay as they were."""
+    t = np.clip(((np.asarray(co, np.float64) - point) @ normal + half) / (2 * half), 0.0, 1.0)
+    t = t * t * (3 - 2 * t)
+    total = np.asarray(w_thigh, np.float64) + np.asarray(w_shin, np.float64)
+    return total * (1 - t), total * t
+
+
 # ============================================================================== Blender side (bpy below)
 def _log(msg: str) -> None:
     print(f"[r3d] {msg}", flush=True)
@@ -720,6 +752,92 @@ def smooth_limb_weights(mapping: dict[str, str], repeat: int) -> list[str]:
         bpy.ops.object.mode_set(mode="OBJECT")
         done.append(o.name)
     return done
+
+
+def _skinned_meshes() -> list:
+    return [o for o in bpy.data.objects if o.type == "MESH" and any(m.type == "ARMATURE" for m in o.modifiers)]
+
+
+def _world_co(o) -> np.ndarray:
+    """(N,3) world positions of a mesh's vertices as stored (the rest shape: no modifiers)."""
+    n = len(o.data.vertices)
+    co = np.empty(n * 3, np.float64)
+    o.data.vertices.foreach_get("co", co)
+    W = np.array(o.matrix_world)
+    return co.reshape(n, 3) @ W[:3, :3].T + W[:3, 3]
+
+
+def _read_weights(o, names: list[str], verts: np.ndarray | None = None) -> np.ndarray:
+    """(len(verts), len(names)) weights of `verts` (default: every vertex) in those vertex groups (0 if absent)."""
+    col = {o.vertex_groups[n].index: j for j, n in enumerate(names) if n in o.vertex_groups}
+    verts = np.arange(len(o.data.vertices)) if verts is None else verts
+    W = np.zeros((len(verts), len(names)))
+    mv = o.data.vertices
+    for r, i in enumerate(verts.tolist()):
+        for g in mv[i].groups:
+            j = col.get(g.group)
+            if j is not None:
+                W[r, j] = g.weight
+    return W
+
+
+def _write_weights(o, names: list[str], verts: np.ndarray, old: np.ndarray, new: np.ndarray) -> int:
+    """Set the rows `new` (was `old`) of `verts` in those vertex groups, created when missing; weights below
+    WEIGHT_EPS leave the group. Returns how many vertices changed."""
+    groups = [o.vertex_groups.get(n) or o.vertex_groups.new(name=n) for n in names]
+    changed = 0
+    for r, i in enumerate(verts.tolist()):
+        moved = False
+        for j, vg in enumerate(groups):
+            w0, w1 = float(old[r, j]), float(new[r, j])
+            if abs(w1 - w0) <= 1e-7:
+                continue
+            moved = True
+            if w1 > WEIGHT_EPS:
+                vg.add([i], w1, "REPLACE")
+            elif w0 > 0:
+                vg.remove([i])
+        changed += moved
+    return changed
+
+
+def band_knee_weights(rig: Rig, mapping: dict[str, str], half: float) -> dict:
+    """leg_weights "band" on every skinned mesh: per knee, the vertices carrying thigh or shin weight, how many
+    changed and their mean L1 change."""
+    heads = rig.rest_heads_world()
+    out = {}
+    for o in _skinned_meshes():
+        co, res = _world_co(o), {}
+        for side in ("left", "right"):
+            joints = ("hip", "knee", "ankle")
+            bones = [mapping.get(f"{side}_{j}") for j in joints]
+            if None in bones:  # the knee plane needs all three: this leg keeps the auto-rig's split, and says so
+                res[side] = {"skipped": "unmapped " + ", ".join(j for j, b in zip(joints, bones, strict=True)
+                                                                 if b is None)}
+                continue
+            if not any(b in o.vertex_groups for b in bones[:2]):
+                continue
+            point, normal = knee_plane(*(heads[rig.index[b]] for b in bones))
+            names = bones[:2]
+            W = _read_weights(o, names)
+            verts = np.flatnonzero(W.sum(1) > 0)
+            new = np.stack(knee_band(co[verts], W[verts, 0], W[verts, 1], point, normal, half), 1)
+            res[side] = {"vertices": int(len(verts)), "changed": _write_weights(o, names, verts, W[verts], new),
+                         "mean_l1_change": round(float(np.abs(new - W[verts]).sum(1).mean()), 4) if len(verts)
+                         else 0.0}
+        out[o.name] = res
+    return out
+
+
+def apply_leg_weights(settings: dict, rig: Rig, mapping: dict[str, str]) -> dict | None:
+    """The job's leg_weights mode (LEG_WEIGHTS) on the welded, smoothed skin; None for "meshy"."""
+    mode = settings.get("leg_weights", "meshy")
+    if mode not in LEG_WEIGHTS:
+        raise ValueError(f"leg_weights {mode!r}: one of {LEG_WEIGHTS}")
+    if mode == "band":
+        half = float(settings.get("knee_band_cm", KNEE_BAND_CM)) / 100
+        return {"mode": mode, "half_width_m": half, "meshes": band_knee_weights(rig, mapping, half)}
+    return None
 
 
 def rig_from_blender(arm) -> Rig:
@@ -924,6 +1042,9 @@ def build(job: dict) -> dict:
     skin_fix = {}
     if settings.get("smooth_limb_weights"):
         skin_fix["weights_smoothed"] = smooth_limb_weights(mapping, int(settings["smooth_limb_weights"]))
+    legs = apply_leg_weights(settings, rig, mapping)  # after the smoothing, which would blur them again
+    if legs:
+        skin_fix["leg_weights"] = legs
     if skin_fix:
         _log(f"skin fixes: {skin_fix}")
     _log(f"rig: {len(rig.names)} bones, mapped {len(mapping)}/22, "

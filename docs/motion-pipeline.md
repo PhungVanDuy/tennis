@@ -757,7 +757,7 @@ Decisions recorded in the code comments, in pipeline order:
 
 ## Tests
 
-`.venv/bin/pytest -q` (164 tests at the time of writing; no GPU, Blender, API key or private input needed, see
+`.venv/bin/pytest -q` (170 tests at the time of writing; no GPU, Blender, API key or private input needed, see
 [architecture](architecture.md#tests)). Motion-lane coverage:
 
 | File | Covers |
