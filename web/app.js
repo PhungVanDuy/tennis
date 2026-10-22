@@ -1938,7 +1938,7 @@ const vrCmd = (V, cmd, profile) => `${V.config ? `R3D_CONFIG=${V.config} ` : ''}
 const motionWho = () => (D.variants?.length && D.athlete?.name ? ` — ${esc(D.athlete.name)}` : '');
 
 function variantSections(list) {
-  return comparisonSection(D.comparisons) + (list || []).map(variantSection).join('');
+  return (list || []).map(variantSection).join('') + comparisonSection(D.comparisons);
 }
 
 /** Side-by-side videos (<run>/compare/): one clip, two characters or settings, same everything else. */
@@ -1946,16 +1946,16 @@ function comparisonSection(list) {
   if (!list?.length) return '';
   return `<div class="block mo vr" id="compare">
     <div class="art-head"><h2>Model comparison <small>${plural(list.length, 'video')}</small></h2></div>
-    ${list.map((c) => {
+    <div class="cmp-grid">${list.map((c) => {
       const v = c.video || {};
       const ar = v.width && v.height ? (v.width / v.height).toFixed(4) : '0.81';
-      return `<figure class="mo-reel" style="--ar:${ar}">
+      return `<figure class="mo-reel cmp" style="--ar:${ar}">
         <video controls muted loop playsinline preload="metadata" poster="${esc(c.poster || '')}" src="${esc(v.url || '')}"
           ${v.width && v.height ? `style="aspect-ratio:${v.width} / ${v.height}"` : ''}></video>
         <figcaption><span>${esc(c.title)}</span><span>${v.width && v.height ? `${dimsOf([v.width, v.height])} · ` : ''}<a href="${esc(v.url || '')}" target="_blank" rel="noopener">full size ↗</a></span></figcaption>
         ${c.note ? `<p class="block-lede">${esc(c.note)}</p>` : ''}
       </figure>`;
-    }).join('')}
+    }).join('')}</div>
   </div>`;
 }
 
@@ -1981,13 +1981,18 @@ function variantSection(V) {
   const missingTiles = V.n_rendered - V.n_tiles;
   const notes = [
     live === 'draft' && (q3.rendered || V.n_hires) ? ['vr-note', `Quest 3 renders in progress: ${Math.max(q3.rendered || 0, V.n_hires || 0)} of ${V.n_clips} clips at 2064×2208. Clips marked <b>2064×2208 ↗</b> already open their full-resolution video; the reel stays the draft until every clip is rendered.`] : null,
-    V.reel_stale ? ['mo-stale', `The reel predates the latest renders${isNum(V.n_in_reel) ? ` (it holds ${V.n_in_reel} of the ${V.n_rendered} rendered clips)` : ''}: run <code>${esc(compose(live))}</code>.`] : null,
+    live === 'quest3' && isNum(V.n_in_reel) && V.n_in_reel < V.n_clips
+      ? ['vr-note', `The reel is composed once all ${V.n_clips} clips are rendered (${V.n_rendered} so far${V.n_outdated ? `; ${V.n_outdated} from the previous rig are being re-rendered` : ''}); every rendered clip plays in the grid below.`] : null,
+    V.reel_stale && !(live === 'quest3' && isNum(V.n_in_reel) && V.n_in_reel < V.n_clips) ? ['mo-stale', `The reel predates the latest renders${isNum(V.n_in_reel) ? ` (it holds ${V.n_in_reel} of the ${V.n_rendered} rendered clips)` : ''}: run <code>${esc(compose(live))}</code>.`] : null,
     live && !V.composed ? ['vr-note', `Not composed yet: the grid shows every rendered clip's poster; <code>${esc(compose(live))}</code> makes the reel and the playable tiles.`] : null,
-    V.composed && missingTiles > 0 ? ['vr-note', `${plural(missingTiles, 'rendered clip')} ${missingTiles === 1 ? 'has' : 'have'} no light tile yet and show${missingTiles === 1 ? 's its' : ' their'} poster until the next compose.`] : null,
-    V.n_tiles_stale ? ['vr-note', `${plural(V.n_tiles_stale, 'tile')} predate${V.n_tiles_stale === 1 ? 's' : ''} a re-render of ${V.n_tiles_stale === 1 ? 'its clip' : 'their clips'}; the full-resolution link is current.`] : null,
+    V.composed && missingTiles > 0 ? ['vr-note', `${plural(missingTiles, 'rendered clip')} ${missingTiles === 1 ? 'has' : 'have'} no light tile yet and play${missingTiles === 1 ? 's its' : ' their'} full-resolution video until the next compose.`] : null,
+    V.n_tiles_stale ? ['vr-note', `${plural(V.n_tiles_stale, 'tile')} predate${V.n_tiles_stale === 1 ? 's' : ''} a re-render of ${V.n_tiles_stale === 1 ? 'its clip' : 'their clips'}: ${V.n_tiles_stale === 1 ? 'that clip plays its' : 'those clips play their'} new full-resolution video instead.`] : null,
   ].filter(Boolean);
-  const reel = V.reel;
-  const reelHtml = reel?.url
+  // a quest3 reel laid out for the whole moveset but holding only part of it is mostly empty paper: until it holds
+  // every clip, the grid below is the page and the reel waits
+  const partial = live === 'quest3' && isNum(V.n_in_reel) && V.n_in_reel < V.n_clips;
+  const reel = partial ? null : V.reel;
+  const reelHtml = partial ? '' : reel?.url
     ? `<figure class="mo-reel" style="--ar:${(size ? size[0] / size[1] : 1).toFixed(4)}">
         <video class="vr-reel" muted loop playsinline preload="none" disablepictureinpicture
           poster="${esc(reel.poster || '')}" src="${esc(reel.url)}"${size ? ` style="aspect-ratio:${size[0]} / ${size[1]}"` : ''}></video>
@@ -2032,12 +2037,16 @@ function vrTile(V, c) {
   const full = c.mp4 ? `<a class="vr-full${hi ? ' hi' : ''}" href="${esc(c.mp4)}" target="_blank" rel="noopener" title="${esc(`${hi || V.profile !== 'draft' ? 'Full resolution' : 'Draft'}: ${res}`)}">${esc(label)}</a>` : '';
   const caption = `<figcaption><span class="mono">${esc(c.id)}</span>${moFlag(c)}${full}</figcaption>`;
   if (!c.tile && !c.poster && !c.tile_poster) {
-    return `<figure class="mo-clip vr-clip pending"><div class="mo-frame"><span>${c.mp4 ? 'poster pending' : 'render pending'}</span></div>${caption}</figure>`;
+    return `<figure class="mo-clip vr-clip pending"><div class="mo-frame"><span>${c.mp4 ? 'poster pending' : c.outdated ? 're-render pending' : 'render pending'}</span></div>${caption}</figure>`;
   }
-  const media = c.tile
-    ? `<video class="vr-tile" muted loop playsinline preload="none" disablepictureinpicture poster="${esc(c.tile_poster || c.poster || '')}" src="${esc(c.tile)}"></video>
+  // the light tile while it shows the current render; otherwise (no tile yet, or one from an earlier render) the
+  // full-resolution video itself plays in the grid
+  const src = c.tile && !c.tile_stale ? c.tile : c.mp4 || c.tile;
+  const still = c.tile && !c.tile_stale ? c.tile_poster || c.poster : c.poster || c.tile_poster;
+  const media = src
+    ? `<video class="vr-tile" muted loop playsinline preload="none" disablepictureinpicture poster="${esc(still || '')}" src="${esc(src)}"></video>
        <span class="vr-play" aria-hidden="true">${ICON.play}</span>`
-    : `<img src="${esc(c.tile_poster || c.poster)}" alt="" loading="lazy"><span class="mo-tag">poster · tile pending</span>`;
+    : `<img src="${esc(still)}" alt="" loading="lazy"><span class="mo-tag">poster · tile pending</span>`;
   return `<figure class="mo-clip vr-clip" data-vr-clip="${esc(c.id)}" tabindex="0" role="button" aria-label="${esc(`${c.id}: open the full-resolution video`)}">
       <div class="mo-frame">${media}</div>${caption}</figure>`;
 }

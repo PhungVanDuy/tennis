@@ -90,6 +90,7 @@ def _quest3(cfg: Config) -> RunLayout:
     for p in (reel, *tdir.iterdir()):
         _age(p, 50)
     _write(v.moveset_glb)
+    _age(v.moveset_glb, 200)                       # every render above was made from this moveset
     return v
 
 
@@ -142,6 +143,18 @@ def test_quest3_variant_links_what_exists(run_cfg, tmp_path):
     os.utime(v.motion_renders_for("quest3") / "forehand_00m03s.mp4")
     n = site._variants(run_cfg, site._Linker(tmp_path / "site"))[0]
     assert n["n_tiles_stale"] == 1 and next(c for c in n["clips"] if c["id"] == "forehand_00m03s")["tile_stale"]
+
+
+def test_renders_of_an_earlier_moveset_wait_for_their_re_render(run_cfg, tmp_path):
+    v = _quest3(run_cfg)
+    _write(v.moveset_glb)                          # the rig changed: renders older than the moveset show the old one
+    _age(v.motion_renders_for("quest3") / "serve_00m02s.mp4", -10)     # this one was re-rendered since
+    [n] = site._variants(run_cfg, site._Linker(tmp_path / "site"))
+    by = {c["id"]: c for c in n["clips"]}
+    old = by["serve_00m01s"]
+    assert old["outdated"] is True and old["mp4"] is None and old["tile"] is None and old["poster"] is None
+    assert by["serve_00m02s"]["outdated"] is False and by["serve_00m02s"]["mp4"]
+    assert (n["n_rendered"], n["n_outdated"]) == (1, 2)
 
 
 def test_draft_is_live_until_quest3_is_composed(run_cfg, tmp_path):

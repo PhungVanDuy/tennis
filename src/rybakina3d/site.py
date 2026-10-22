@@ -836,7 +836,8 @@ def _variant(cfg: Config, link: _Linker, name: str) -> dict | None:
         # the clips' render size: the report's `size` is its reel's, the fixed 2064 x 2208 canvas even for the draft
         "profile": live, "composed": bool(rep), "size": rend.get("size") or rep.get("size"),
         "fps": rend.get("fps") or rep.get("fps"), "reel": None, "reel_stale": False, "groups": [], "clips": [],
-        "n_clips": 0, "n_rendered": 0, "n_tiles": 0, "n_tiles_stale": 0, "n_flagged": 0, "n_in_reel": None,
+        "n_clips": 0, "n_rendered": 0, "n_tiles": 0, "n_tiles_stale": 0, "n_outdated": 0, "n_flagged": 0,
+        "n_in_reel": None,
         "progress": progress, "downloads": downloads, "made": rep.get("made"),
         "updated": _mtime(*(run.motion_dir / f"motion_{p}.json" for p in VARIANT_PROFILES),
                           *(run.motion_renders_for(p) / "renders.json" for p in VARIANT_PROFILES)),
@@ -883,12 +884,17 @@ def _variant(cfg: Config, link: _Linker, name: str) -> dict | None:
             if hi:  # the deliverable is already there for this clip: link it, with its own facts
                 source, mp4, row, r = best, hi, best_rows.get(cid) or {"size": progress[best]["size"]}, {}
                 poster = _first(_report_path(root, best_dir, row.get("poster")), hi.with_suffix(".jpg")) or poster
+            # a video older than the moveset shows an earlier rig (it is re-rendered from the current one): pending
+            outdated = bool(mp4 and run.moveset_glb.exists() and not _fresh(mp4, run.moveset_glb))
             tile = _first(_report_path(root, tdir, r.get("tile")), tdir / f"{cid}.mp4")
             tile_poster = _first(_report_path(root, tdir, r.get("tile_poster")), tdir / f"{cid}.jpg")
+            if outdated:
+                mp4 = poster = tile = tile_poster = None
             f = _file(link, mp4, rel(mp4)) if mp4 else None
             sources += [mp4] if f else []
             clips.append({
                 "id": cid, "stroke": r.get("stroke") or stroke, "profile": source if mp4 else None,
+                "outdated": outdated,
                 "flagged": bool(r["flagged"]) if "flagged" in r else flagged.get(cid, False),
                 "mp4": f["url"] if f else None, "mb": f["size_mb"] if f else None,
                 "poster": media(poster), "tile": media(tile), "tile_poster": media(tile_poster),
@@ -927,6 +933,7 @@ def _variant(cfg: Config, link: _Linker, name: str) -> dict | None:
         clips=clips, n_clips=len(clips), n_rendered=sum(bool(c["mp4"]) for c in clips),
         n_hires=sum(c["profile"] == best for c in clips),
         n_tiles=sum(bool(c["tile"]) for c in clips), n_tiles_stale=sum(c["tile_stale"] for c in clips),
+        n_outdated=sum(c["outdated"] for c in clips),
         n_flagged=sum(bool(c["flagged"]) for c in clips),
     )
     return out

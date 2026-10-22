@@ -588,6 +588,9 @@ table.shots td.events { white-space: normal; min-width: 220px; }
 .mo-reel figcaption span + span { color: var(--text-3); }
 .mo-reel figcaption a { color: var(--text-2); }
 .mo-reel > .pending-box { min-height: 240px; }
+.cmp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr)); gap: 16px; align-items: start; }
+.mo-reel.cmp { flex: none; width: 100%; }
+.mo-reel.cmp .block-lede { font-size: 13px; margin-top: 8px; }
 .mo-clips { margin-top: 26px; }
 .mo-clips > h3 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
 .mo-clips > h3 small { color: var(--text-3); font-weight: 450; font-size: 12.5px; }
