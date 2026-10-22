@@ -35,6 +35,18 @@ Requirements:
   workstation stages need no Blender.
 - Fonts (optional). `artwork compose` uses macOS system fonts (Baskerville, Didot, Snell Roundhand from
   `/System/Library/Fonts/Supplemental`), then DejaVu (`/usr/share/fonts/truetype/dejavu`), then Pillow's default.
+- YuNet weights (only for `r3d character face`, an optional stage for art-team variants that the Naomi character
+  does not use; see [character.md](character.md#5-a-character-drawn-by-the-art-team-the-naomi-variant)). The
+  stage reads OpenCV's YuNet face detector from `weights/yunet/face_detection_yunet_2023mar.onnx` under the
+  project root (`YUNET` in `character/face.py`) and stops with the download URL when the file is missing. It
+  comes from opencv_zoo. `weights/` is gitignored, so a clone lacks it. The stage also runs the local Blender,
+  found as for `character mesh`.
+
+  ```bash
+  mkdir -p weights/yunet
+  curl -fL -o weights/yunet/face_detection_yunet_2023mar.onnx \
+    https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+  ```
 
 Install:
 
@@ -42,7 +54,7 @@ Install:
 uv venv --python 3.12 .venv
 uv pip install -e ".[api,dev]"
 .venv/bin/r3d --help
-.venv/bin/pytest -q && .venv/bin/ruff check src tests     # 132 tests, about 20 s (see the note below)
+.venv/bin/pytest -q && .venv/bin/ruff check src tests     # 164 tests, about 25 s (see the note below)
 ```
 
 | Extra | Contents | Where |
@@ -89,6 +101,7 @@ these exact names, which come from the code and config.
 | `Screenshot 2026-10-21 at 14.05.59.png` | `SHEET_SCREENSHOT` in `character/refs.py` | `character refs` | a screenshot with a partial view of a target-style character sheet, cropped by `SHEET_CROP` into a style reference for `stylize` |
 | `naomi_style.png` | `STYLE_REFERENCE` in `artwork/layout.py` | `artwork paint`, `compose`, `motion-render`, `motion-paint`, `motion-compose`; 5 tests | the client's style reference character sheet. The sheet layout follows it, `paint` crops one figure of each kind from it (`STYLE_CROPS`), and `paint.paper_colour()` samples the paper colour from it. `scripts/sync.sh` copies it to the host because `motion-render` composites on that paper |
 | `assets/client/` | nothing | none | images extracted from the deck for inspection. No stage reads them |
+| `artexamplesfortennisnaomiosaka/` | `character.refs_dir` in `configs/naomi.yaml`; file names in `ART_REFS` (`character/art.py`) | `character refs` with `configs/naomi.yaml`, which copies them into `variants/naomi/character/refs/` for `stylize`, `mesh` and `face` | the art team's renders of the Naomi character: the A-pose front, the art-direction sheet and the head renders ([character.md](character.md#5-a-character-drawn-by-the-art-team-the-naomi-variant)). Only the Naomi variant needs it |
 
 `character refs` also downloads four freely licensed photos from Wikimedia Commons (`COMMONS` in
 `character/refs.py`) and records each file's Commons page URL and licence in `character/refs/refs.json`.
@@ -154,7 +167,8 @@ failed stage pulls nothing.
    excluded files on the host (`.venv`, `bin`, `weights`, `runs`, the video) are not deleted.
 2. **Push the run inputs.** It rsyncs `runs/rybakina/` to the host without `PUSH_EXCLUDES` (`source/proxy.mp4`,
    `source/audio16k.wav`, `anim/`, `site/`, partial files, and all workstation-made artwork: repaints, sheets,
-   `artwork.json`, painted motion, reels, `motion.json`). Of `clips/`, only the workstation's calibrations
+   `artwork.json`, painted motion, reels, `motion.json`, `motion_<profile>.json`, and the clip videos of
+   `artwork/motion/render*/`, which only the host makes). Of `clips/`, only the workstation's calibrations
    `clips/*/camera.npz` go up (`PUSH_FILTERS`).
 3. **Run.** It runs `ssh -o BatchMode=yes $R3D_HOST "cd ~/rybakina3d && export PATH=$HOME/rybakina3d/bin:$PATH
    GVHMR_CHECKPOINTS=… GVHMR_BODY_MODELS=… R3D_BLENDER=<remote.blender> PYTHONUNBUFFERED=1 [R3D_CONFIG=…] &&
@@ -177,7 +191,12 @@ them on the workstation while a remote stage is still running. Neither direction
 so a file deleted on one machine stays on the other.
 
 `r3d remote` forwards `R3D_CONFIG` but not `--config`. To use another config on both machines, set
-`R3D_CONFIG` (a path inside the project), not `-c`.
+`R3D_CONFIG` (a path inside the project), not `-c` ([A character variant](#a-character-variant)).
+
+The exclude patterns have no leading `/`, so rsync matches them at any depth: a variant's
+`variants/<name>/anim/`, `artwork/motion/frames/` and workstation-made artwork travel by the same rules as the
+Rybakina ones. The artwork patterns name the outputs by suffix (`artwork/*_character_sheet*`, `artwork/*_moveset_*`,
+`artwork/motion/*_moveset_*`), so they hold for any `<stem>`.
 
 ## Running stages
 
@@ -196,9 +215,9 @@ FROM=retarget scripts/run_pipeline.sh   # resume from a stage
 | `character` | `r3d character refs`, `stylize`, `mesh` |
 | `clips`, `track`, `motion`, `curate`, `qa`, `retarget` | `r3d remote <name>` |
 | `curate2`, `qa2` | `r3d remote curate`, `r3d remote qa` (second passes: with the QA gate; on the retargeted character) |
-| `artwork` | `r3d artwork poses`, `r3d remote artwork render`, `r3d artwork paint`, `r3d artwork compose` |
+| `artwork` | `r3d artwork poses`, `r3d remote artwork render`, `r3d artwork paint`, `r3d artwork compose`, then the moving artwork at the `web` profile: `r3d remote artwork motion-render`, `r3d artwork motion-paint`, `r3d artwork motion-compose` |
 
-The moving artwork is not part of the script. Run it after `artwork`:
+To run only the moving artwork:
 
 ```bash
 .venv/bin/r3d remote artwork motion-render
@@ -221,17 +240,67 @@ whose outputs exist (and recomputes it with `--force`) or rewrites its outputs o
 | `clips`, `track`, `camera`, `motion` | skip a clip whose output exists (`clip.json` + `clip.mp4`, `track.npz`, `camera.npz`, `motion.npz`) | recomputes. `camera` first deletes the old calibration so a stale one cannot survive; `motion` deletes `gvhmr/` |
 | `character stylize` | keeps `hero.png` and `turnaround.png`; always re-cuts the views | regenerates both |
 | `character mesh` | keeps each generator that already has a rig | regenerates both |
-| `artwork render`, `artwork motion-render` | re-render only what changed: per figure / video fingerprint of the GLB, pose, camera, size, samples and a version constant (`RENDER_VERSION`, `MOTION_VERSION`) | renders everything |
+| `artwork render`, `artwork motion-render` | re-render only what changed: per figure / video fingerprint of the GLB, pose, camera, size, samples and a version constant (`RENDER_VERSION`, `MOTION_VERSION`, plus the whole profile and `PROFILE_VERSION` for `--profile quest3` / `draft`). When only the encoding changed and the frames are still on the host under the same render key, `motion-render` re-encodes them without Blender | renders everything |
 | `artwork paint`, `artwork motion-paint` | cached by fingerprint (render + matte bytes, model, prompt). A changed render or prompt repaints only that figure or clip, and a failed call is retried on the next run. `motion-paint` also re-applies its acceptance thresholds to cached outputs without a call | repaints everything |
 
-`--clip <id>` (repeatable) limits `clips`, `track`, `camera` and `motion` to those clips. For `retarget` it
-limits only the check renders, since the moveset always holds every kept clip. Clip ids are
+`--clip <id>` (repeatable) limits `clips`, `track`, `camera`, `motion` and `artwork motion-render` to those clips.
+For `retarget` it limits only the check renders, since the moveset always holds every kept clip. Clip ids are
 `<stroke>_<MM>m<SS>s`, from the contact time in the source, e.g. `serve_16m13s`.
 
 ```bash
 .venv/bin/r3d camera --clip serve_16m13s --force
 .venv/bin/r3d remote motion --clip serve_16m13s --force
 ```
+
+### A character variant
+
+A variant is a second character on the same captured motion, built from its own config (`configs/naomi.yaml`,
+which `extends` the Rybakina config; see [Other configs](#other-configs-extends-and-character-variants)). Its
+`character/`, `anim/` and `artwork/` live under `runs/rybakina/variants/<name>/` with `<name>_*` file names, while
+the footage, clips, motion, curation and QA at the run root are shared. Pick the config per machine:
+
+- **Workstation stages:** `-c configs/naomi.yaml` (or `R3D_CONFIG=configs/naomi.yaml`).
+- **`r3d remote`:** `R3D_CONFIG=configs/naomi.yaml` only. `r3d remote` forwards `R3D_CONFIG` to the host as a
+  project-relative path and does not forward `-c`, so with `-c` the host would run the default config.
+- **`r3d site`:** the default config. The site lists every variant in the run folder's `variants/` on its own
+  ([review-site.md](review-site.md#character-variants)).
+
+```bash
+# workstation: the character (character.md, section 5)
+.venv/bin/r3d character refs -c configs/naomi.yaml
+.venv/bin/r3d character stylize -c configs/naomi.yaml
+.venv/bin/r3d character mesh -c configs/naomi.yaml
+# GPU host: the variant's moveset on the shared motion
+R3D_CONFIG=configs/naomi.yaml .venv/bin/r3d remote retarget
+# the Quest 3 set (docs/artwork.md, section 4): render, compose and publish in batches
+scripts/render_quest3.sh
+.venv/bin/r3d site
+```
+
+Do not re-run the shared stages with a variant's config. `qa` in particular writes the shared
+`clips/<id>/qa.json` and `qa_summary.json` at the run root, and with a variant's config its character pass would
+read the variant's joint tracks.
+
+`scripts/render_quest3.sh` takes three environment variables:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CONFIG` | `configs/naomi.yaml` | exported as `R3D_CONFIG` for every command it runs |
+| `PROFILE` | `quest3` | the render profile (`quest3`, `draft`; `artwork/layout.py` `PROFILES`) |
+| `BATCH` | `4` | clips per batch |
+
+It orders the moveset like `motion-render` (`motion_render.FIRST`, then curation order). Per batch it runs
+`r3d remote artwork motion-render --profile $PROFILE --clip …`, then `r3d artwork motion-compose --profile
+$PROFILE` on the workstation, then `r3d publish`, so the shared site shows the reel growing at the same URL. An
+interrupted run resumes: finished clips match their fingerprint and are skipped. For a quick look first:
+`PROFILE=draft BATCH=13 scripts/render_quest3.sh`.
+
+With `DETACH=1` the script pushes code and run, starts itself on the GPU host (`ON_HOST=1`, detached with
+`setsid nohup`, log in `~/<remote.root>/logs/quest3.log`) and returns. There every batch renders, composes and
+rebuilds the site locally (`r3d site` under the default config), so the workstation may sleep or shut down
+during the hours of a `quest3` run. The host loop first waits for any `r3d artwork motion-render` already
+running there, so it never renders the same clips twice. Its reel and `motion_<profile>.json` stay on the host:
+pulls never overwrite workstation artwork (`remote.WORKSTATION_ARTWORK`).
 
 ### Review
 
@@ -274,6 +343,28 @@ Examples: `camera.MIN_OK_FRACTION = 0.90`, `curate.OVERHEAD_MIN_RISE_M = 0.25`, 
 `motion-paint` accepts at most 121 frames per clip (`VIDEO_MAX_FRAMES`, 4.84 s at 25 fps). A `select.window_s`
 longer than that makes the stage raise for those clips.
 
+### Other configs: `extends` and character variants
+
+A config can start from another with `extends: <file>`, a path relative to the config itself. `Config.load`
+reads the base first and deep-merges the file over it: mappings merge key by key, any other value (a list, a
+number, a string) replaces the base's. `configs/naomi.yaml` is `extends: rybakina.yaml` plus:
+
+| Key | Value | What it does |
+|---|---|---|
+| `character.variant` | `naomi` | makes this a variant: `RunLayout.out` is `runs/rybakina/variants/naomi/` and `RunLayout.stem` is `naomi` (file names `naomi_*`) |
+| `character.name` | `Naomi Osaka` | `Config.display_name`, the name on the artwork (default: `athlete.name`) |
+| `character.height_m` | `1.80` | the rig height |
+| `character.refs_dir` | `artexamplesfortennisnaomiosaka` | the art team's renders (project-relative); `character refs` and `stylize` then take the art-team path (`character/art.py`) |
+| `retarget.smooth_limb_weights` | `20` | Laplacian passes over the limb weights before retargeting (`blender/retarget.py` `smooth_limb_weights`); `0` (the default) leaves the auto-rig's weights |
+| `retarget.weld_m` | `1.0e-5` | skinned-mesh vertices closer than this (metres) are merged before retargeting (`blender/retarget.py` `weld_meshes`); the default `0` keeps the mesh as shipped (Rybakina) |
+| `character.mesh_primary` | `hi3d` | the generator whose rig becomes `character/rigged.glb` (`meshy`, `tripo`, `hunyuan` or `hi3d`) |
+| `character.racket_colors` | `frame`, `grip`, `strings` as linear RGB | the racket's colours, passed to `blender/racket.py` through the retarget job |
+| `models.mesh` | `""` | no Meshy generator for this variant |
+| `models.mesh_alt` | `hitem3d/hi3d/v3.0/multi-view-to-3d` | the A/B generator (`hunyuan-3d` and `tripo3d` endpoints are recognised too), rigged by `fal-ai/meshy/rigging` |
+
+Everything else (athlete, source, remote, the other models, thresholds, `run_dir`) comes from `configs/rybakina.yaml`, so
+both configs share one run folder and one GPU-host layout.
+
 ## Time and cost
 
 The code and the run reports record only some of these figures. Gemini and image-model prices are not recorded
@@ -287,7 +378,22 @@ anywhere in the repository.
 | `artwork render` | 13.7 s Cycles for the hero figure at 128 samples on the A100 | `artwork/renders/blender.json` |
 | `artwork paint` | 33–66 s per GPT Image call (median 46 s): 11 calls (13 samples, since the strict retry asks for 3) for 10 figures, 4 in parallel | `artwork/painted/paint.json` |
 | `artwork motion-render` | 2,681 frames (39 clips + 150-frame turntable): 3,554 s at 48 samples on one A100. At `layout.MOTION.samples = 64` the same frames take about 65 min (about 1.3 s a frame), so `motion_render.SAMPLES` caps it at 48. After OIDN, a 48-sample frame differs from a 64-sample one by 0.7/255 on average | `artwork/motion/render/renders.json`, `motion_render.py` |
+| `artwork motion-render --profile quest3` | 2064 × 2208 at 60 fps, 16 samples. Measured at 32 samples, before the profile was set to 16: 4.2 s Cycles + 0.64 s matte a frame on one A100 (Rybakina's `backhand_14m19s`, 139 frames). The moveset is 6,065 frames at 60 fps, about 8.2 h at that rate. A 2.3 s clip encodes to about 1.35 MB | `artwork/motion/render_quest3/renders.json`, `layout.PROFILES` |
+| `artwork motion-render --profile draft` | 516 × 552 at 60 fps, 16 samples: 0.41 s Cycles + 0.05 s matte a frame on the same clip, about 47 min for the moveset. Naomi's full draft on the earlier Hunyuan character (39 clips, 6,065 frames) took 4,240 s of Blender time (about 71 min): 0.53 s + 0.09 s a frame and about 12 s of setup per clip | `artwork/motion/render_draft/renders.json`, `archive/naomi_hunyuan/artwork/motion/render_draft/renders.json` |
 | `artwork motion-paint` | Bernini-R takes about 10 min a clip, 8 clips in flight (`WORKERS`). List price `VIDEO_PRICE_USD_S = 0.08` per output second: the 39 clips go out as 2,615 frames (each padded to 4k+1), 104.6 s, about USD 8.4 for the video model alone. The frame-0 repaints and BiRefNet matting cost extra, and a clip whose anchor fails costs no video call. Per-clip `cost_usd` and the total go to `artwork/motion/painted/paint.json` | `motion_paint.py` |
+
+Disk for the Quest 3 set:
+
+- **GPU host.** A `quest3` frame is about 3.2 MB of PNGs (RGBA + matte; 438.5 MB for the 139-frame backhand at 32 samples),
+  about 19 GB for the moveset. `quest3` sets `keep_frames=False`, so each clip's PNGs are deleted after its video
+  is encoded, when the run's Blender job has finished. One run over the whole moveset therefore peaks near 19 GB;
+  `scripts/render_quest3.sh`'s batches of 4 clips peak at 4 clips' frames (about 0.6 GB per 194-frame serve). The
+  cost is that a changed `quest3` encoding renders again.
+  `draft` keeps its frames, about 0.26 MB a frame (1.6 GB for the Hunyuan draft's 6,065), and so does `web`. All of them sit
+  in `artwork/motion/frames/` (`frames/<profile>/` for `quest3` and `draft`), which is never pulled.
+- **Workstation.** Only the videos come back: about 1.35 MB per 2.3 s `quest3` clip, 0.12 to 0.39 MB per draft
+  clip (9.7 MB for the Hunyuan draft's 39), plus the reel (3.7 MB for that draft) and the 336 × 360 site copies that
+  `motion-compose` writes.
 
 ## Troubleshooting
 
@@ -314,4 +420,6 @@ Failure modes that came up in this project or that the code guards against, with
 | Videos do not seek in the review site | use `r3d serve`, which answers HTTP Range requests with 206; `python -m http.server` does not |
 | The page stays on its loader | the page imports three.js 0.169.0 from `cdn.jsdelivr.net` through an import map, so it needs network access; offline, the whole module graph fails to load |
 | A copied `site/` folder shows nothing | `site/media/` holds relative symlinks into the run folder; copy with `cp -RL` or `rsync -L` to share it |
+| `r3d remote … -c configs/naomi.yaml` runs the stage for the Rybakina character | `-c` is local only: the host loads its default config. Use `R3D_CONFIG=configs/naomi.yaml .venv/bin/r3d remote …` |
+| `character face`: `no …/weights/yunet/face_detection_yunet_2023mar.onnx: download … there` | the YuNet weights are not in the repository; download them as in [Workstation](#workstation) |
 | `character refs` stalls on Wikimedia Commons | HTTP 429 rate limiting; `refs` waits 5, 10, 20, 40 and 80 s between at most 5 download attempts, then raises |

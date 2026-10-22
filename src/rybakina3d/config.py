@@ -90,6 +90,14 @@ class Character(BaseModel):
     height_m: float = 1.84
     target_tris: int = 24000
     views: list[str] = Field(default_factory=lambda: ["front", "left", "back", "right"])
+    # A second character on the same captured motion: its character/, anim/ and artwork/ live under
+    # <run_dir>/variants/<variant>/ with <variant>_* file names, while footage, clips and motion stay shared.
+    variant: str | None = None
+    name: str | None = None          # display name on the artwork (default: the athlete's)
+    refs_dir: Path | None = None     # the variant's own reference images (project-relative)
+    geometry_resolution: str | None = None   # Meshy multi-image: "standard" | "2k" (None = the endpoint default)
+    mesh_primary: str | None = None  # the generator whose rig becomes character/rigged.glb (meshy|tripo|hunyuan|hi3d)
+    racket_colors: dict[str, list[float]] | None = None   # linear RGB "frame" / "grip" / "strings" (blender/racket.py)
 
 
 class Curate(BaseModel):
@@ -99,6 +107,8 @@ class Curate(BaseModel):
 class Retarget(BaseModel):
     ground_from_contacts: bool = True
     smooth_window: int = 5
+    weld_m: float = 0.0     # merge skinned-mesh vertices closer than this (m) before retargeting; 0 = keep as shipped
+    smooth_limb_weights: int = 0      # Laplacian passes over the limb weights before retargeting (0 = off)
 
 
 class Site(BaseModel):
@@ -125,14 +135,34 @@ class Config(BaseModel):
     @classmethod
     def load(cls, path: Path | str | None = None) -> Config:
         path = Path(path or os.environ.get("R3D_CONFIG", DEFAULT_CONFIG))
-        cfg = cls.model_validate(yaml.safe_load(path.read_text()))
+        cfg = cls.model_validate(_read_yaml(path))
         cfg.run_dir = _abs(cfg.run_dir)
         cfg.source.video = _abs(cfg.source.video)
+        if cfg.character.refs_dir:
+            cfg.character.refs_dir = _abs(cfg.character.refs_dir)
         return cfg
 
     @cached_property
     def run(self) -> RunLayout:
-        return RunLayout(self.run_dir)
+        return RunLayout(self.run_dir, self.character.variant)
+
+    @property
+    def display_name(self) -> str:
+        return self.character.name or self.athlete.name
+
+
+def _read_yaml(path: Path) -> dict:
+    """A config file, with `extends: other.yaml` (relative to it) deep-merged underneath."""
+    data = yaml.safe_load(path.read_text()) or {}
+    base = data.pop("extends", None)
+    return _merge(_read_yaml(path.parent / base), data) if base else data
+
+
+def _merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
 
 
 def _abs(p: Path) -> Path:
@@ -163,10 +193,18 @@ class ClipLayout:
 
 
 class RunLayout:
-    """Canonical paths inside a run directory, shared by every stage on every machine."""
+    """Canonical paths inside a run directory, shared by every stage on every machine.
 
-    def __init__(self, root: Path):
+    Footage, clips and motion sit at the run root. The character and everything made from it (anim/, artwork/)
+    sit under `out`: the root itself, or variants/<variant>/ for a second character on the same motion, whose
+    files are then named <variant>_* instead of rybakina_*. Reports keep paths relative to `root`.
+    """
+
+    def __init__(self, root: Path, variant: str | None = None):
         self.root = root
+        self.variant = variant
+        self.out = root / "variants" / variant if variant else root
+        self.stem = variant or "rybakina"
 
     def ensure(self, *dirs: Path) -> None:
         for d in dirs:
@@ -208,41 +246,45 @@ class RunLayout:
     signature = property(lambda s: s.root / "signature.json")
 
     # character
-    character_dir = property(lambda s: s.root / "character")
-    refs_dir = property(lambda s: s.root / "character" / "refs")
-    refs = property(lambda s: s.root / "character" / "refs" / "refs.json")
-    sheet_dir = property(lambda s: s.root / "character" / "sheet")
-    views_dir = property(lambda s: s.root / "character" / "sheet" / "views")   # cut-out turnaround views
-    stylize_report = property(lambda s: s.root / "character" / "sheet" / "stylize.json")
-    mesh_dir = property(lambda s: s.root / "character" / "mesh")
-    mesh_report = property(lambda s: s.root / "character" / "mesh" / "mesh.json")
-    rig = property(lambda s: s.root / "character" / "rigged.glb")
-    character_report = property(lambda s: s.root / "character" / "character.json")
+    character_dir = property(lambda s: s.out / "character")
+    refs_dir = property(lambda s: s.out / "character" / "refs")
+    refs = property(lambda s: s.out / "character" / "refs" / "refs.json")
+    sheet_dir = property(lambda s: s.out / "character" / "sheet")
+    views_dir = property(lambda s: s.out / "character" / "sheet" / "views")   # cut-out turnaround views
+    stylize_report = property(lambda s: s.out / "character" / "sheet" / "stylize.json")
+    mesh_dir = property(lambda s: s.out / "character" / "mesh")
+    mesh_report = property(lambda s: s.out / "character" / "mesh" / "mesh.json")
+    rig = property(lambda s: s.out / "character" / "rigged.glb")
+    character_report = property(lambda s: s.out / "character" / "character.json")
 
     # assembly + review
-    anim_dir = property(lambda s: s.root / "anim")
-    moveset_glb = property(lambda s: s.root / "anim" / "rybakina_moveset.glb")
-    moveset_fbx = property(lambda s: s.root / "anim" / "rybakina_moveset.fbx")
-    moveset_blend = property(lambda s: s.root / "anim" / "rybakina_moveset.blend")   # stays on the GPU host
-    retarget_report = property(lambda s: s.root / "anim" / "retarget.json")
-    joints_dir = property(lambda s: s.root / "anim" / "joints")   # retargeted joint tracks for `qa`
-    checks_dir = property(lambda s: s.root / "anim" / "checks")   # retarget review renders
+    anim_dir = property(lambda s: s.out / "anim")
+    moveset_glb = property(lambda s: s.out / "anim" / f"{s.stem}_moveset.glb")
+    moveset_fbx = property(lambda s: s.out / "anim" / f"{s.stem}_moveset.fbx")
+    moveset_blend = property(lambda s: s.out / "anim" / f"{s.stem}_moveset.blend")   # stays on the GPU host
+    retarget_report = property(lambda s: s.out / "anim" / "retarget.json")
+    joints_dir = property(lambda s: s.out / "anim" / "joints")   # retargeted joint tracks for `qa`
+    checks_dir = property(lambda s: s.out / "anim" / "checks")   # retarget review renders
     site_dir = property(lambda s: s.root / "site")
 
     # artwork (character sheets from the game-ready character + captured motion)
-    artwork_dir = property(lambda s: s.root / "artwork")
-    artwork_poses = property(lambda s: s.root / "artwork" / "poses.json")
-    artwork_renders = property(lambda s: s.root / "artwork" / "renders")
-    artwork_painted = property(lambda s: s.root / "artwork" / "painted")
-    character_sheet = property(lambda s: s.root / "artwork" / "rybakina_character_sheet.png")
-    character_sheet_render = property(lambda s: s.root / "artwork" / "rybakina_character_sheet_render.png")
-    moveset_atlas = property(lambda s: s.root / "artwork" / "rybakina_moveset_atlas.png")
-    artwork_report = property(lambda s: s.root / "artwork" / "artwork.json")
+    artwork_dir = property(lambda s: s.out / "artwork")
+    artwork_poses = property(lambda s: s.out / "artwork" / "poses.json")
+    artwork_renders = property(lambda s: s.out / "artwork" / "renders")
+    artwork_painted = property(lambda s: s.out / "artwork" / "painted")
+    character_sheet = property(lambda s: s.out / "artwork" / f"{s.stem}_character_sheet.png")
+    character_sheet_render = property(lambda s: s.out / "artwork" / f"{s.stem}_character_sheet_render.png")
+    moveset_atlas = property(lambda s: s.out / "artwork" / f"{s.stem}_moveset_atlas.png")
+    artwork_report = property(lambda s: s.out / "artwork" / "artwork.json")
     # artwork in motion (every clip as a video in the sheet's look)
-    motion_dir = property(lambda s: s.root / "artwork" / "motion")
-    motion_frames = property(lambda s: s.root / "artwork" / "motion" / "frames")      # GPU host only, never pulled
-    motion_renders = property(lambda s: s.root / "artwork" / "motion" / "render")
-    motion_painted = property(lambda s: s.root / "artwork" / "motion" / "painted")
-    moveset_reel = property(lambda s: s.root / "artwork" / "motion" / "rybakina_moveset_reel.mp4")
-    moveset_reel_render = property(lambda s: s.root / "artwork" / "motion" / "rybakina_moveset_reel_render.mp4")
-    motion_report = property(lambda s: s.root / "artwork" / "motion" / "motion.json")
+    motion_dir = property(lambda s: s.out / "artwork" / "motion")
+    motion_frames = property(lambda s: s.out / "artwork" / "motion" / "frames")      # GPU host only, never pulled
+    motion_renders = property(lambda s: s.out / "artwork" / "motion" / "render")
+    motion_painted = property(lambda s: s.out / "artwork" / "motion" / "painted")
+    moveset_reel = property(lambda s: s.out / "artwork" / "motion" / f"{s.stem}_moveset_reel.mp4")
+    moveset_reel_render = property(lambda s: s.out / "artwork" / "motion" / f"{s.stem}_moveset_reel_render.mp4")
+    motion_report = property(lambda s: s.out / "artwork" / "motion" / "motion.json")
+
+    def motion_renders_for(self, profile: str = "web") -> Path:
+        """Clip videos of one render profile (artwork/layout.py PROFILES): `web` keeps the original folder."""
+        return self.motion_renders if profile == "web" else self.motion_dir / f"render_{profile}"

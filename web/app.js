@@ -218,7 +218,7 @@ async function boot() {
   window.addEventListener('hashchange', route);
   route();
   // console handle for reviewers (and the headless check): r3dReview.moveset().tl.frame, …
-  window.r3dReview = { data: () => D, state: S, moveset: () => MV, character: () => CV };
+  window.r3dReview = { data: () => D, state: S, moveset: () => MV, character: () => CV, variants: () => VR };
 }
 
 function route() {
@@ -232,6 +232,7 @@ function route() {
 
   CV?.stage.setActive(view === 'character');
   motionActive(view === 'artwork');
+  variantActive(view === 'artwork');
   if (view !== 'moveset' && MV) {
     MV.tl.pause();
     MV.stage.setActive(false);
@@ -1634,8 +1635,9 @@ function renderArtwork() {
         same figures unpainted. In motion, the same character plays every one of her captured clips.</p>
     </div>${artDownloads(A)}</div>`;
   if (!A || !(A.sheet || A.sheet_render || A.atlas)) {
-    $('#view-artwork').innerHTML = `${head}${motionSection(A?.motion)}
+    $('#view-artwork').innerHTML = `${head}${variantSections(D.variants)}${motionSection(A?.motion)}
       <div class="block"><h2>Character sheet</h2>${pendingBox('Artwork pending: run r3d artwork poses, r3d remote artwork render, r3d artwork paint, r3d artwork compose.')}</div>`;
+    wireVariants();
     wireMotion(A?.motion);
     return;
   }
@@ -1648,7 +1650,7 @@ function renderArtwork() {
     A.silhouettes.length ? `${A.silhouettes.length} silhouettes cut from the render mattes` : '',
     A.missing.length ? `${A.missing.length} not rendered (${A.missing.map(esc).join(', ')})` : '',
   ].filter(Boolean).join(' · ');
-  $('#view-artwork').innerHTML = `${head}${motionSection(A.motion)}
+  $('#view-artwork').innerHTML = `${head}${variantSections(D.variants)}${motionSection(A.motion)}
     <div class="block">
       <div class="art-head">
         <h2>Character sheet <small>${esc(note)}</small></h2>
@@ -1677,6 +1679,7 @@ function renderArtwork() {
     $$('#art-mode button').forEach((x) => x.classList.toggle('active', x === b));
     $('#art-sheets').dataset.mode = b.dataset.mode;
   });
+  wireVariants();
   wireMotion(A.motion);
 }
 
@@ -1766,7 +1769,7 @@ function moTile(c, mode) {
 
 function motionSection(M) {
   if (!M) {
-    return `<div class="block" id="art-motion"><h2>In motion</h2>
+    return `<div class="block" id="art-motion"><h2>In motion${motionWho()}</h2>
       ${pendingBox(`Motion pending: run ${MO_CMD}.`)}</div>`;
   }
   const mode = M.n_painted ? 'painted' : 'render';
@@ -1792,7 +1795,7 @@ function motionSection(M) {
     : `<div class="mo-reel">${pendingBox('Moveset reel pending: run r3d artwork motion-compose.')}</div>`;
   return `<div class="block mo" id="art-motion" data-mode="${mode}">
     <div class="art-head">
-      <h2>In motion <small>${esc(sub)}</small></h2>
+      <h2>In motion${motionWho()} <small>${esc(sub)}</small></h2>
       <div class="seg accent" id="mo-mode" role="group" aria-label="Video version">
         <button type="button" data-mode="painted" class="${mode === 'painted' ? 'active' : ''}"${M.n_painted ? '' : ' disabled title="No painted clips yet"'}>Painted</button>
         <button type="button" data-mode="render" class="${mode === 'render' ? 'active' : ''}">3D render</button>
@@ -1916,6 +1919,225 @@ function openMotionClip(c) {
   });
 }
 
+// ------------------------------------------------------------------------------------------------ character variants
+// Another character on the same captured motion (variants/<name>/ in the run folder, D.variants), rendered for
+// Meta Quest 3 (render profile quest3: 2064×2208 per eye, 60 fps real time) or, until that is composed, its
+// quarter-size draft. The reel plays while it is on screen. Every clip is a light tile that plays on hover (a tap on
+// touch screens), one at a time, and links to its full-resolution video, which the grid itself never loads.
+const VR_LIVE = {
+  quest3: ['Quest 3 renders', 'var(--pass)', 'Rendered at the Quest 3 per-eye resolution, 60 fps'],
+  draft: ['Draft preview', 'var(--warn)', 'The quarter-size draft of the Quest 3 framing and frame rate, shown until the Quest 3 renders are composed'],
+};
+let VR = null;                      // { io, visible: Set<reel>, tile: the tile playing, held, pointer }
+
+const playVideo = (v) => { const p = v.play(); if (p) p.catch(() => {}); };
+const dimsOf = (s) => (Array.isArray(s) && s.length === 2 ? `${s[0]}×${s[1]}` : '');
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const vrCmd = (V, cmd, profile) => `${V.config ? `R3D_CONFIG=${V.config} ` : ''}r3d ${cmd} --profile ${profile}`;
+/** With a variant above it, the In motion block says whose character it shows. */
+const motionWho = () => (D.variants?.length && D.athlete?.name ? ` — ${esc(D.athlete.name)}` : '');
+
+function variantSections(list) {
+  return comparisonSection(D.comparisons) + (list || []).map(variantSection).join('');
+}
+
+/** Side-by-side videos (<run>/compare/): one clip, two characters or settings, same everything else. */
+function comparisonSection(list) {
+  if (!list?.length) return '';
+  return `<div class="block mo vr" id="compare">
+    <div class="art-head"><h2>Model comparison <small>${plural(list.length, 'video')}</small></h2></div>
+    ${list.map((c) => {
+      const v = c.video || {};
+      const ar = v.width && v.height ? (v.width / v.height).toFixed(4) : '0.81';
+      return `<figure class="mo-reel" style="--ar:${ar}">
+        <video controls muted loop playsinline preload="metadata" poster="${esc(c.poster || '')}" src="${esc(v.url || '')}"
+          ${v.width && v.height ? `style="aspect-ratio:${v.width} / ${v.height}"` : ''}></video>
+        <figcaption><span>${esc(c.title)}</span><span>${v.width && v.height ? `${dimsOf([v.width, v.height])} · ` : ''}<a href="${esc(v.url || '')}" target="_blank" rel="noopener">full size ↗</a></span></figcaption>
+        ${c.note ? `<p class="block-lede">${esc(c.note)}</p>` : ''}
+      </figure>`;
+    }).join('')}
+  </div>`;
+}
+
+function variantSection(V) {
+  const live = V.profile;
+  const size = V.reel?.size || V.size;
+  const fps = V.reel?.fps || V.fps;
+  const tile = V.clips.find((c) => c.size)?.size || V.size;
+  const compose = (p) => vrCmd(V, 'artwork motion-compose', p);
+  const sub = [
+    live ? `${V.n_rendered} of ${V.n_clips} clips rendered` : 'not rendered yet',
+    live === 'draft' && V.n_hires ? `${V.n_hires} at full resolution` : '',
+    dimsOf(V.size) ? `${dimsOf(V.size)}${live === 'quest3' ? ' per eye' : ''}` : '',
+    isNum(V.fps) ? `${num(V.fps)} fps` : '',
+    V.n_flagged ? `${V.n_flagged} flagged by curate` : '',
+  ].filter(Boolean).join(' · ');
+  const [liveLabel, liveColor, liveTitle] = VR_LIVE[live] || ['Pending', 'var(--text-3)', 'Nothing rendered at the Quest 3 profile yet'];
+  const dl = (f, label) => (f ? `<a class="btn small" href="${esc(f.url)}" download>${label}${isNum(f.size_mb) ? ` <span class="faint">${num(f.size_mb, 1)} MB</span>` : ''}</a>` : '');
+  const anims = V.downloads?.animations;
+  const downloads = V.downloads?.glb || V.downloads?.fbx
+    ? `<span class="faint">character + ${anims ? plural(anims, 'animation') : 'moveset'}</span>${dl(V.downloads.glb, 'GLB')}${dl(V.downloads.fbx, 'FBX')}` : '';
+  const q3 = V.progress?.quest3 || {};
+  const missingTiles = V.n_rendered - V.n_tiles;
+  const notes = [
+    live === 'draft' && (q3.rendered || V.n_hires) ? ['vr-note', `Quest 3 renders in progress: ${Math.max(q3.rendered || 0, V.n_hires || 0)} of ${V.n_clips} clips at 2064×2208. Clips marked <b>2064×2208 ↗</b> already open their full-resolution video; the reel stays the draft until every clip is rendered.`] : null,
+    V.reel_stale ? ['mo-stale', `The reel predates the latest renders${isNum(V.n_in_reel) ? ` (it holds ${V.n_in_reel} of the ${V.n_rendered} rendered clips)` : ''}: run <code>${esc(compose(live))}</code>.`] : null,
+    live && !V.composed ? ['vr-note', `Not composed yet: the grid shows every rendered clip's poster; <code>${esc(compose(live))}</code> makes the reel and the playable tiles.`] : null,
+    V.composed && missingTiles > 0 ? ['vr-note', `${plural(missingTiles, 'rendered clip')} ${missingTiles === 1 ? 'has' : 'have'} no light tile yet and show${missingTiles === 1 ? 's its' : ' their'} poster until the next compose.`] : null,
+    V.n_tiles_stale ? ['vr-note', `${plural(V.n_tiles_stale, 'tile')} predate${V.n_tiles_stale === 1 ? 's' : ''} a re-render of ${V.n_tiles_stale === 1 ? 'its clip' : 'their clips'}; the full-resolution link is current.`] : null,
+  ].filter(Boolean);
+  const reel = V.reel;
+  const reelHtml = reel?.url
+    ? `<figure class="mo-reel" style="--ar:${(size ? size[0] / size[1] : 1).toFixed(4)}">
+        <video class="vr-reel" muted loop playsinline preload="none" disablepictureinpicture
+          poster="${esc(reel.poster || '')}" src="${esc(reel.url)}"${size ? ` style="aspect-ratio:${size[0]} / ${size[1]}"` : ''}></video>
+        <figcaption><span>Moveset reel, ${esc(V.name)}</span>
+          <span>${[dimsOf(size), isNum(fps) ? `${num(fps)} fps` : '', isNum(reel.loop_s) ? `${num(reel.loop_s, 1)} s loop` : ''].filter(Boolean).map((x) => `${x} · `).join('')}<a href="${esc(reel.url)}" download>download${isNum(reel.size_mb) ? ` ${num(reel.size_mb, 1)} MB` : ''}</a> · <a href="${esc(reel.url)}" target="_blank" rel="noopener">full size ↗</a></span></figcaption>
+      </figure>`
+    : `<div class="mo-reel">${pendingBox(live
+      ? `Reel pending: run ${compose(live)}.`
+      : `Renders pending: run ${vrCmd(V, 'remote artwork motion-render', 'quest3')} (--profile draft for a quick preview), then ${compose('quest3')}.`)}</div>`;
+  const byId = Object.fromEntries(V.clips.map((c) => [c.id, c]));
+  const groups = V.groups.map((g) => ({ stroke: g.stroke, clips: g.clips.map((id) => byId[id]).filter(Boolean) }))
+    .filter((g) => g.clips.length);
+  const grid = V.clips.some((c) => c.mp4 || c.tile || c.poster)
+    ? `<div class="mo-clips">
+      <h3>Every clip <small>hover a clip to play it (tap on a touch screen); click it or “full ↗” for the full-resolution video</small></h3>
+      ${groups.map((g) => `<div class="mo-group">
+        <div class="mo-group-head"><b>${esc(cap(g.stroke))}</b><span class="faint">${plural(g.clips.length, 'clip')}</span></div>
+        <div class="mo-grid">${g.clips.map((c) => vrTile(V, c)).join('')}</div></div>`).join('')}
+      ${V.n_flagged ? `<p class="views-note"><span class="mo-flag"></span> flagged by curate: the captured motion does not match the clip's stroke label; animated and kept all the same.</p>` : ''}
+    </div>` : '';
+  return `<div class="block mo vr" id="vr-${esc(V.variant)}" data-variant="${esc(V.variant)}" style="--tile-ar:${(tile ? tile[0] / tile[1] : 1).toFixed(4)}">
+    <div class="art-head">
+      <h2>${esc(V.name)} — Quest 3 <small>${esc(sub)}</small></h2>
+      <div class="art-dl"><span class="chip" title="${esc(liveTitle)}"><span class="sw" style="background:${liveColor}"></span>${esc(liveLabel)}</span>${downloads}</div>
+    </div>
+    <p class="block-lede">${esc(V.name)} playing ${esc(V.motion_from || 'the captured')}'s moveset: every captured clip retargeted onto
+      the ${esc(V.name)} character and rendered in Blender Cycles for Meta Quest 3, at its per-eye resolution of 2064×2208 and
+      60 frames per second (the motion is keyed at the broadcast's 25 fps and sampled in between). Render only, no painting.
+      In the reel every clip hits the ball on the same frame.${live === 'draft' ? ' What plays here for now is the quarter-size draft of the same framing and frame rate.' : ''}</p>
+    ${notes.map(([cls, html]) => `<p class="${cls}">${html}</p>`).join('')}
+    <div class="mo-top">${reelHtml}</div>
+    ${grid}
+  </div>`;
+}
+
+function vrTile(V, c) {
+  const fps = c.fps || V.fps;
+  const res = [dimsOf(c.size || V.size), isNum(fps) ? `${num(fps)} fps` : '', isNum(c.mb) ? `${num(c.mb, 1)} MB` : ''].filter(Boolean).join(', ');
+  // a clip whose Quest 3 video exists while the draft is live says so; the others say what they open
+  const hi = c.profile === 'quest3' && V.profile !== 'quest3';
+  const label = hi ? `${dimsOf(c.size) || 'full'} ↗` : V.profile === 'draft' ? 'draft ↗' : 'full ↗';
+  const full = c.mp4 ? `<a class="vr-full${hi ? ' hi' : ''}" href="${esc(c.mp4)}" target="_blank" rel="noopener" title="${esc(`${hi || V.profile !== 'draft' ? 'Full resolution' : 'Draft'}: ${res}`)}">${esc(label)}</a>` : '';
+  const caption = `<figcaption><span class="mono">${esc(c.id)}</span>${moFlag(c)}${full}</figcaption>`;
+  if (!c.tile && !c.poster && !c.tile_poster) {
+    return `<figure class="mo-clip vr-clip pending"><div class="mo-frame"><span>${c.mp4 ? 'poster pending' : 'render pending'}</span></div>${caption}</figure>`;
+  }
+  const media = c.tile
+    ? `<video class="vr-tile" muted loop playsinline preload="none" disablepictureinpicture poster="${esc(c.tile_poster || c.poster || '')}" src="${esc(c.tile)}"></video>
+       <span class="vr-play" aria-hidden="true">${ICON.play}</span>`
+    : `<img src="${esc(c.tile_poster || c.poster)}" alt="" loading="lazy"><span class="mo-tag">poster · tile pending</span>`;
+  return `<figure class="mo-clip vr-clip" data-vr-clip="${esc(c.id)}" tabindex="0" role="button" aria-label="${esc(`${c.id}: open the full-resolution video`)}">
+      <div class="mo-frame">${media}</div>${caption}</figure>`;
+}
+
+function wireVariants() {
+  VR?.io?.disconnect();
+  VR = null;
+  const secs = $$('#view-artwork .vr[data-variant]');
+  if (!secs.length) return;
+  VR = { visible: new Set(), tile: null, held: false, pointer: 'mouse' };
+  VR.io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) {
+        VR.visible.add(e.target);
+        if (!VR.held) playVideo(e.target);
+      } else {
+        VR.visible.delete(e.target);
+        e.target.pause();
+      }
+    }
+  }, { threshold: 0.15 });
+  for (const v of $$('#view-artwork video.vr-reel')) VR.io.observe(v);
+  for (const sec of secs) {
+    const V = D.variants.find((x) => x.variant === sec.dataset.variant);
+    const clipOf = (fig) => V?.clips.find((c) => c.id === fig.dataset.vrClip);
+    sec.addEventListener('pointerdown', (e) => { VR.pointer = e.pointerType; });
+    sec.addEventListener('pointerover', (e) => {
+      const fig = e.pointerType === 'mouse' && e.target.closest('[data-vr-clip]');
+      const v = fig && $('video.vr-tile', fig);
+      if (v && v !== VR.tile) vrPlay(v);
+    });
+    sec.addEventListener('pointerout', (e) => {
+      const fig = e.target.closest('[data-vr-clip]');
+      if (e.pointerType === 'mouse' && fig && !fig.contains(e.relatedTarget) && VR.tile && fig.contains(VR.tile)) vrStop();
+    });
+    sec.addEventListener('click', (e) => {
+      const fig = e.target.closest('[data-vr-clip]');
+      if (!fig || e.target.closest('a')) return;      // "full ↗" opens the full-resolution video itself
+      const v = $('video.vr-tile', fig);
+      // touch has no hover: a tap plays or pauses the tile; a mouse click opens the full-resolution video
+      if (VR.pointer !== 'mouse' && v) {
+        if (v === VR.tile && !v.paused) vrStop(); else vrPlay(v);
+        return;
+      }
+      const c = clipOf(fig);
+      if (c) openVariantClip(V, c);
+    });
+    sec.addEventListener('keydown', (e) => {
+      const fig = e.target.closest('[data-vr-clip]');
+      // Enter on the focused "full ↗" link follows the link, as a click on it does
+      if (!fig || e.target.closest('a') || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      const c = clipOf(fig);
+      if (c) openVariantClip(V, c);
+    });
+  }
+}
+
+/** One tile plays at a time: a 2064×2208 grid's light copies are still dozens of decoders. */
+function vrPlay(v) {
+  if (!VR || VR.held) return;
+  if (VR.tile && VR.tile !== v) vrStop();
+  VR.tile = v;
+  v.closest('.vr-clip')?.classList.add('playing');
+  playVideo(v);
+}
+
+function vrStop() {
+  const v = VR?.tile;
+  if (!v) return;
+  v.pause();
+  v.closest('.vr-clip')?.classList.remove('playing');
+  VR.tile = null;
+}
+
+/** Like motionActive: the reels autoplay (on screen) on the artwork view only; leaving it stops every video. */
+function variantActive(on) {
+  if (!VR) return;
+  VR.io.disconnect();
+  VR.visible.clear();
+  vrStop();
+  for (const v of $$('#view-artwork video.vr-reel')) {
+    v.pause();
+    v.autoplay = on;
+    if (on) VR.io.observe(v);
+  }
+}
+
+function openVariantClip(V, c) {
+  const src = c.mp4 || c.tile;
+  if (!src) return;
+  const fps = c.fps || V.fps;
+  const frames = isNum(c.frames) ? ` · ${c.frames} frames${isNum(c.contact_frame) ? `, contact at frame ${c.contact_frame}` : ''}` : '';
+  openLightboxVideo({
+    src, poster: c.poster || c.tile_poster,
+    caption: `${c.id} · ${cap(c.stroke)}${c.flagged ? ' (flagged by curate)' : ''} · ${V.name} · ${dimsOf(c.size || V.size)}${isNum(fps) ? ` · ${num(fps)} fps` : ''}${frames}${c.mp4 ? '' : ' · light tile, the full video is pending'}`,
+    link: D.clipById[c.id] ? { href: `#/moveset/${encodeURIComponent(c.id)}`, text: `Review ${c.id} in the Moveset tab →` } : null,
+  });
+}
+
 // ------------------------------------------------------------------------------------------------ overlays
 function openLightboxVideo({ src, poster, caption, link }) {
   const lb = $('#lightbox');
@@ -1933,6 +2155,7 @@ function openLightboxVideo({ src, poster, caption, link }) {
   if (link) { a.href = link.href; a.textContent = link.text; }
   lb.hidden = false;
   if (MO) { MO.held = true; MO.visible.forEach((v) => v.pause()); }
+  if (VR) { VR.held = true; VR.visible.forEach((v) => v.pause()); vrStop(); }
 }
 
 function setupLightbox() {
@@ -1949,6 +2172,7 @@ function setupLightbox() {
     video.removeAttribute('src');
     video.load();
     if (MO?.held) { MO.held = false; MO.visible.forEach((v) => MO.play(v)); }
+    if (VR?.held) { VR.held = false; VR.visible.forEach(playVideo); }
   };
   document.addEventListener('click', (e) => {
     const t = e.target.closest('[data-full]');

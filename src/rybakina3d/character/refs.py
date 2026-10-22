@@ -83,6 +83,10 @@ def run(cfg: Config) -> list[Ref]:
 
     from PIL import Image
 
+    if cfg.character.refs_dir:  # a variant the art team drew: their renders are the references
+        from .art import collect
+
+        return collect(cfg)
     out_dir = cfg.run.refs_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     refs: list[Ref] = []

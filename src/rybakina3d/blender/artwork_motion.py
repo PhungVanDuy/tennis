@@ -6,9 +6,13 @@
 (blender/artwork.py `Studio`: lights following the camera, shadow-catcher floor lit by its own high soft light,
 OIDN, AgX, the Workbench matte); this script only changes what moves:
 
-  clip       the clip's whole action, frame i of the render = frame i of the clip (scene at the clip rate, keys on
-             whole frames 0..n-1). ONE camera for the clip, at the job's azimuth / elevation relative to the way she
-             faces at contact, aimed at and fitted to the union of every frame's vertices (racket included) plus
+  clip       the clip's whole action in real time. At the clip rate (job fps == out_fps, the web profile) frame i
+             of the render is frame i of the clip (scene at the clip rate, keys on whole frames 0..n-1, rendered as
+             one animation). At another rate (out_fps, e.g. 60 for a headset) output frame k is the action at
+             `frame_times` (a sub-frame between two keys, the importer's linear keys interpolated by Blender), the
+             contact landing exactly on an output frame; each frame is then rendered as a still at its sub-frame
+             with the floor set for it. ONE camera for the clip, at the job's azimuth / elevation relative to the
+             way she faces at contact, aimed at and fitted to the union of every frame's vertices (racket included) plus
              the ground patch around her feet: she moves through a still frame and nothing leaves it. The lights
              stay fixed to that camera and the noise seed stays fixed, so nothing but her changes between frames.
              The floor (`floor_track`) follows her lowest vertex while she is on the ground, like each still's
@@ -20,7 +24,11 @@ OIDN, AgX, the Workbench matte); this script only changes what moves:
 Frames go to <frames_dir>/rgba_####.png (Cycles, RGBA on a transparent film with the contact shadow) and
 matte_####.png (Workbench, alpha = figure coverage), numbered from 0; the paper goes under in the driver, in
 display space like the stills. After each video a `[r3d] done <name>` line tells the driver it can encode it.
-The numpy half (square framing, floor track, orbit, ground region) imports without Blender for the unit tests.
+The frame is the job's size, square or not: the lens is fitted with a vertical sensor fit (sensor height = image
+height) and the shift in units of the image height (Blender's viewplane factor for a vertical fit, whatever the
+orientation; only AUTO uses the larger side), so a portrait frame holds the whole motion with the same margins.
+The numpy half (frame timing, fixed-size framing, floor track, orbit, ground region) imports without Blender for
+the unit tests.
 """
 
 from __future__ import annotations
@@ -52,9 +60,26 @@ MATTE_AA = "8"           # Workbench samples for the matte (the stills use 16; a
 
 
 # ------------------------------------------------------------------------------------------------ numpy
+def frame_times(n: int, contact: int, fps: float, out_fps: float) -> tuple[np.ndarray, int]:
+    """(action time of every output frame in clip frames, the contact's output frame) for a clip of `n` frames at
+    `fps` played in real time at `out_fps`. The duration is kept (round(n * out_fps / fps) frames, so the clip's
+    last frame is held for its own 1/fps like at the source rate), the step is fps / out_fps clip frames, and the
+    grid is phased so the contact falls exactly on an output frame (its pose is the atlas still, and the reel can
+    line contacts up on one frame); times are clamped to the clip [0, n-1]. At out_fps == fps: 0, 1, ..., n-1."""
+    n, contact = int(n), int(np.clip(contact, 0, n - 1))
+    step = float(fps) / float(out_fps)
+    n_out = max(1, int(round(n / step)))
+    k_contact = min(int(round(contact / step)), n_out - 1)
+    times = contact + (np.arange(n_out) - k_contact) * step
+    return np.clip(times, 0.0, n - 1.0), k_contact
+
+
 def fit_square(uv: np.ndarray, size: tuple[int, int], margins: tuple[float, float, float]) -> dict:
-    """Lens, shift and focal (px) that put `uv` (normalised coords) inside a fixed `size` frame, centred, with
-    the still framing's margins (fractions of the framed height); the frame's other axis keeps the slack."""
+    """Lens, shift and focal (px) that put `uv` (normalised coords) inside a fixed `size` frame (square or not),
+    centred, with the still framing's margins (fractions of the framed height); whichever axis binds gets the
+    margins, the other keeps the slack. Vertical sensor fit (`_setup_camera`): lens_mm = 24 mm * f_px / H, and
+    Blender then measures the shift in units of the image height (its viewplane factor for a vertical fit; only
+    AUTO uses the larger side), checked against Blender's own projection for square, portrait and landscape."""
     W, H = int(size[0]), int(size[1])
     (u0, v0), (u1, v1) = uv.min(axis=0), uv.max(axis=0)
     span = v1 - v0
@@ -62,9 +87,8 @@ def fit_square(uv: np.ndarray, size: tuple[int, int], margins: tuple[float, floa
     u0, u1, v0, v1 = u0 - side, u1 + side, v0 - bottom, v1 + top
     f_px = min(W / (u1 - u0), H / (v1 - v0))
     cu, cv = (u0 + u1) / 2, (v0 + v1) / 2
-    big = max(W, H)
     return {"width": W, "height": H, "f_px": f_px, "lens_mm": 24.0 * f_px / H, "sensor_height_mm": 24.0,
-            "shift_x": cu * f_px / big, "shift_y": cv * f_px / big, "centre": (cu, cv)}
+            "shift_x": cu * f_px / H, "shift_y": cv * f_px / H, "centre": (cu, cv)}
 
 
 def floor_track(lowest: np.ndarray, grounded_m: float = still.GROUNDED_M) -> np.ndarray:
@@ -133,6 +157,12 @@ class MotionStudio(still.Studio):
         scene.render.use_file_extension = True
         scene.display.render_aa = MATTE_AA
         self.size = tuple(int(v) for v in job["size"])
+        # one tile per frame: past the default 2048 px a 2064 x 2208 frame would render as a big tile plus thin
+        # 16 / 160 px strips that starve the GPU (one tile measured 9% faster at that size); web's 1024 px frame
+        # is one tile either way
+        scene.cycles.tile_size = max(int(scene.cycles.tile_size), *self.size)
+        self.fps = float(job.get("fps", 25.0))                  # the actions' key rate (the clips' rate)
+        self.out_fps = float(job.get("out_fps", self.fps))      # the videos' rate
         self.azimuth, self.elevation = float(job["azimuth"]), float(job["elevation"])
 
     # ---------------------------------------------------------------------------------------- shared
@@ -146,6 +176,11 @@ class MotionStudio(still.Studio):
         data.clip_start, data.clip_end = 0.05, distance * 4 + 50
         self.cam.matrix_world = Matrix(cam)
         self.scene.render.resolution_x, self.scene.render.resolution_y = frame["width"], frame["height"]
+
+    def _at(self, t: float) -> None:
+        """Evaluate the scene at action time `t` (clip frames; a fraction is a sub-frame)."""
+        f = int(math.floor(t))
+        self.scene.frame_set(f, subframe=float(t - f))
 
     @staticmethod
     def _keys(obj, path: str, index: int, values, interpolation: str) -> None:
@@ -177,6 +212,27 @@ class MotionStudio(still.Studio):
         scene.render.engine = "CYCLES"
         return {"cycles": round(t1 - t0, 1), "matte": round(time.time() - t1, 1)}
 
+    def _stills(self, frames_dir: Path, times: np.ndarray, floors: np.ndarray) -> dict:
+        """Render output frame k at action time times[k] as a still (a sub-frame: `animation=True` only renders
+        whole frames), Cycles with the shadow on the floor at floors[k], then the Workbench matte. Persistent data
+        keeps Cycles' kernels and the static scene between the stills like between animation frames; the engines
+        do not alternate per frame, which would drop it."""
+        scene = self.scene
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        seconds = {}
+        for engine, prefix, key in (("CYCLES", "rgba", "cycles"), ("BLENDER_WORKBENCH", "matte", "matte")):
+            t0 = time.time()
+            self.floor.hide_render = engine != "CYCLES"
+            scene.render.engine = engine
+            for k, t in enumerate(times):
+                self.floor.location = (0.0, 0.0, float(floors[k]))
+                self._at(float(t))
+                scene.render.filepath = str(frames_dir / f"{prefix}_{k:04d}.png")
+                bpy.ops.render.render(write_still=True)
+            seconds[key] = round(time.time() - t0, 1)
+        scene.render.engine = "CYCLES"
+        return seconds
+
     # ------------------------------------------------------------------------------------------ clip
     def _play(self, clip: str) -> int:
         self._clear_pose()
@@ -194,21 +250,25 @@ class MotionStudio(still.Studio):
 
     def clip(self, spec: dict) -> dict:
         t0 = time.time()
-        n = self._play(spec["clip"])
-        if spec.get("frames"):          # look-dev: only the first k frames
-            n = min(n, int(spec["frames"]))
+        n_src = self._play(spec["clip"])
+        source_contact = int(np.clip(spec["contact"], 0, n_src - 1))
+        times, contact = frame_times(n_src, source_contact, self.fps, self.out_fps)
+        if spec.get("frames"):          # look-dev: only the first k output frames
+            times = times[:int(spec["frames"])]
+            contact = min(contact, len(times) - 1)
+        n = len(times)
+        whole = np.array_equal(times, np.arange(n))      # the clip's own rate: one animation render, as before
         if self.racket is not None:
             self.racket.hide_render = False
         pts, feet, lowest = [], [], []
         objs = [*self.body, *([self.racket] if self.racket is not None else [])]
-        for i in range(n):
-            self.scene.frame_set(i)
+        for t in times:                 # every output frame's pose: framing, floor and ground track per output frame
+            self._at(float(t))
             v = self._vertices(objs)
             pts.append(v)
             lowest.append(float(v[:, 2].min()))
             feet.append([self.head(j) for j in FEET])
-        contact = int(np.clip(spec["contact"], 0, n - 1))
-        self.scene.frame_set(contact)
+        self._at(float(times[contact]))
         yaw = self.facing()
         floors = floor_track(np.asarray(lowest))
         ground = np.asarray(feet)
@@ -223,16 +283,21 @@ class MotionStudio(still.Studio):
         self._place_lights(cam, target)
         self.floor.animation_data_clear()
         self.floor.location = (0.0, 0.0, 0.0)
-        self._keys(self.floor, "location", 2, enumerate(floors), "CONSTANT")
         t1 = time.time()
-        seconds = self._animation(Path(spec["frames_dir"]), n)
+        if whole:
+            self._keys(self.floor, "location", 2, enumerate(floors), "CONSTANT")
+            seconds = self._animation(Path(spec["frames_dir"]), n)
+        else:
+            seconds = self._stills(Path(spec["frames_dir"]), times, floors)
         self.floor.animation_data_clear()
 
         track = still.to_pixels(still.project(ground.reshape(-1, 3), cam), frame).reshape(n, len(FEET), 2)
         track = track.mean(axis=1).round(1)
         lowest = np.asarray(lowest)
         return {
-            "n_frames": n, "contact_frame": contact, "size": [frame["width"], frame["height"]],
+            "n_frames": n, "contact_frame": contact, "size": [frame["width"], frame["height"]], "fps": self.out_fps,
+            "source": {"fps": self.fps, "n_frames": n_src, "contact_frame": source_contact,
+                       "times": None if whole else times.round(4).tolist()},
             "px_per_m": round(frame["f_px"] / distance, 3),
             "floor_z": round(float(floors[contact]), 4), "floor_z_track": floors.round(4).tolist(),
             "air_m": round(float(np.max(lowest - floors)), 4),   # highest she gets off the floor
@@ -299,10 +364,11 @@ def main(argv: list[str]) -> None:
     studio = MotionStudio(job)
     items = job["items"]
     _log(f"cycles on {studio.device['type']} {studio.device['devices']}, {studio.scene.cycles.samples} samples, "
-         f"{studio.size[0]}x{studio.size[1]}, {len(items)} videos")
+         f"{studio.size[0]}x{studio.size[1]} at {studio.out_fps:g} fps, {len(items)} videos")
     for i, item in enumerate(items):
         res = studio.turntable(item) if item["kind"] == "turntable" else studio.clip(item)
-        res |= {"fingerprint": item.get("fingerprint"), "blender": bpy.app.version_string, "device": studio.device,
+        res |= {"fingerprint": item.get("fingerprint"), "render_key": item.get("render_key"),
+                "blender": bpy.app.version_string, "device": studio.device,
                 "samples": studio.scene.cycles.samples}
         Path(item["report"]).write_text(json.dumps(res, indent=2))
         s = res["seconds"]

@@ -130,6 +130,10 @@ def _split_sheet(sheet: Path, out_dir: Path, names: list[str]) -> list[Path]:
 
 
 def run(cfg: Config, force: bool = False) -> dict:
+    if cfg.character.refs_dir:  # a variant the art team drew: their front + Sunburst for the other views
+        from .art import draw_views
+
+        return draw_views(cfg, force=force)
     run_ = cfg.run
     refs = {r["name"]: run_.refs_dir / r["path"] for r in read_json(run_.refs)}
     out = run_.sheet_dir

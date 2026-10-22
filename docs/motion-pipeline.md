@@ -757,8 +757,8 @@ Decisions recorded in the code comments, in pipeline order:
 
 ## Tests
 
-`.venv/bin/pytest -q` (132 tests at the time of writing; no GPU, Blender or API key needed; 5 artwork tests
-also need `naomi_style.png`, see [architecture](architecture.md#tests)). Motion-lane coverage:
+`.venv/bin/pytest -q` (164 tests at the time of writing; no GPU, Blender, API key or private input needed, see
+[architecture](architecture.md#tests)). Motion-lane coverage:
 
 | File | Covers |
 |---|---|

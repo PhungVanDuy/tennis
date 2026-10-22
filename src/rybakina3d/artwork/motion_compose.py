@@ -21,6 +21,26 @@ figure and contact shadow stay as rendered; the frames are piped to libx264.
     copies for the review site's grid (dozens of 1024 px videos playing at once would choke a browser), the
     painted one put on the render's frames
   → artwork/motion/motion.json: which tiles are painted, layout, timing, sizes
+
+Other render profiles (`--profile quest3 | draft`, artwork/layout.py PROFILES; `web` is all of the above) make one
+render-only reel from that profile's renders (run.motion_renders_for(profile)/renders.json; motion-paint is never
+read): the same design on a FIXED canvas of REEL_EYE = 2064 x 2208, the Meta Quest 3's per-eye resolution, at the
+renders' frame rate (60 fps: the headset refreshes at 72/90/120 Hz and 25 fps judders). The grid's natural height
+at that width is 2270 px (232 px tiles), so the tiles, and with them the group headers and captions, shrink until
+everything fits (224 px for this run's 39 clips in 7 rows); nothing is cropped. The clips are portrait (2064 x
+2208, or 516 x 552 for `draft`), so each is fitted into its square tile whole (contain) and padded with that
+frame's own paper colour, which the paper-ratio compositing turns into the reel's paper. The title is
+cfg.display_name; for a variant the caption says whose captured strokes it plays. Encoded H.264 High, level 5.2,
+CRF 16, yuv420p BT.709 (matrix, primaries and transfer tagged), faststart:
+
+  → artwork/motion/<stem>_moveset_reel_<profile>.mp4 (+ .jpg poster at the contact instant)
+  → artwork/motion/<stem>_moveset_tiles_<profile>/<clip>.mp4 (+ .jpg at contact): light site copies, TILE_WEB px
+    on their long edge, aspect kept
+  → artwork/motion/motion_<profile>.json, every path relative to run.root:
+      {profile, name, motion_from (the athlete when a variant, else null), size [w, h], fps,
+       reel: {mp4, poster, frames, loop_s, mb}, groups: [{stroke, clips: [ids]}],
+       clips: [{id, stroke, flagged, mp4 (the full-size render), poster, tile, tile_poster, size, fps, frames,
+                contact_frame, mb}], made}
 """
 
 from __future__ import annotations
@@ -28,7 +48,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -37,17 +57,28 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from ..config import Config
-from ..media import _bin
+from ..media import _bin, probe
 from ..util import log, read_json, step, write_json
 from . import compose
-from .compose import CARD, FLAG, INK, INK_SOFT, RULE, SCRIPT, SERIF, atlas_grid, paper
-from .layout import MOTION
+from .compose import FLAG, INK, INK_SOFT, RULE, SCRIPT, SERIF, atlas_grid, paper
+from .layout import MOTION, PROFILES
 
 REEL_W = 1920                  # px; the reel's height follows from the grid
-TILE_WEB = 360                 # px, the site's per-clip copies (sharp at ~180 css px on a 2x screen)
+REEL_EYE = PROFILES["quest3"].size   # px (w, h) 2064 x 2208: the non-web reels' fixed canvas, a Quest 3 eye
+TILE_WEB = 360                 # px, the site's per-clip copies (sharp at ~180 css px on a 2x screen); long edge
 HOLD_S = 0.24                  # every tile rests on its last frame before the loop fades back
 TAIL_S = 0.48                  # the fade from every tile's finish through the paper to its first frame (loop point)
 CRF = 20
+# the Quest reel: visually lossless on the flat paper (it costs little there) at a level the headset's decoder
+# takes at 60 fps (5.2: up to 36864 macroblocks a frame and 2073600 a second; 2064 x 2208 is 17802 a frame,
+# 1.07 M a second)
+CRF_EYE = 16
+# ffmpeg leaves H264's -color_primaries / -color_trc out of the stream for these piped RGB frames (only the matrix
+# is tagged); the Quest's player must not guess, so the non-web encodes write all three into x264's VUI (the web
+# encodes stay as they are, byte for byte)
+VUI_709 = ("-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709")
+X264_EYE = ("-profile:v", "high", "-level:v", "5.2", *VUI_709)
+CRF_WEB_COPY = 23              # the site's per-clip copies
 FEATHER = 0.035                # of the tile edge: tiles fade into the paper over this margin
 KEY_COLUMNS = 4                # free columns the last row needs to take the key
 RING = 0.04                    # of the tile edge: the border band whose median is a tile frame's paper colour
@@ -100,11 +131,15 @@ def paint_summary(entry: dict) -> dict:
     }
 
 
-def motion_clips(cfg: Config) -> list[tuple[str, list[ClipMotion]]]:
+def motion_clips(cfg: Config, rdir: Path | None = None, painted: bool = True,
+                 fps: float | None = None) -> list[tuple[str, list[ClipMotion]]]:
     """Every moveset clip with its motion videos, [(stroke, clips)] in the atlas's order (strokes in
-    ATLAS.stroke_order, clips in curation order); a clip without a render yet has render None."""
+    ATLAS.stroke_order, clips in curation order); a clip without a render yet has render None. `rdir` is a render
+    profile's folder (default the web renders); painted=False never looks at motion-paint (render-only reels);
+    `fps` is that profile's frame rate, for videos renders.json does not list yet (motion-render writes it when
+    its run ends): without it a 60 fps video would be taken at the clip's own 25 fps, and so would its contact."""
     run = cfg.run
-    rdir, pdir = run.motion_renders, run.motion_painted
+    rdir, pdir, profile_fps = rdir or run.motion_renders, run.motion_painted, fps
     renders = read_json(rdir / "renders.json") if (rdir / "renders.json").exists() else {}
     rows = renders.get("clips") or {}
     if isinstance(rows, list):
@@ -120,15 +155,20 @@ def motion_clips(cfg: Config) -> list[tuple[str, list[ClipMotion]]]:
             video = resolve_path(run.root, rdir, row.get("mp4") or row.get("video"), rdir / f"{cid}.mp4")
             poster = resolve_path(run.root, rdir, row.get("poster") or row.get("jpg"), rdir / f"{cid}.jpg")
             matte = resolve_path(run.root, rdir, row.get("matte"), rdir / f"{cid}_matte.mp4")
-            contact = _num(row.get("contact_frame"), row.get("contact_index"),
-                           (cur.get(cid) or {}).get("contact_index"), meta.get("contact_index"))
+            fps = _num(row.get("fps"), renders.get("fps"), profile_fps, meta.get("play_fps"), meta.get("src_fps"))
+            contact = _num(row.get("contact_frame"), row.get("contact_index"))
+            if contact is None:   # the clip's own contact counts source frames: rescale it to the video's rate
+                # (round(contact * fps / rate): the output frame blender/artwork_motion.frame_times puts it on)
+                contact = _num((cur.get(cid) or {}).get("contact_index"), meta.get("contact_index"))
+                rate = _num(meta.get("src_fps"), meta.get("play_fps"))
+                if contact is not None and fps and rate and fps != rate:
+                    contact = round(contact * fps / rate)
             m = ClipMotion(cid, stroke, c["flagged"], video if video.exists() else None,
                            poster if poster.exists() else None, matte if matte.exists() else None,
                            int(n) if (n := _num(row.get("n_frames"), row.get("frames"))) else None,
-                           int(contact) if contact is not None else None,
-                           _num(row.get("fps"), renders.get("fps"), meta.get("play_fps"), meta.get("src_fps")), row=row)
+                           int(contact) if contact is not None else None, fps, row=row)
             pj = pdir / f"{cid}.json"
-            if pj.exists():
+            if painted and pj.exists():
                 entry = read_json(pj)
                 m.paint = paint_summary(entry)
                 pv = resolve_path(run.root, pdir, entry.get("mp4") or entry.get("video"), pdir / f"{cid}.mp4")
@@ -158,11 +198,43 @@ class ReelLayout:
     key_x: tuple[float, float]                    # the key's left and right edge
     key_in_grid: bool                             # in the last row's free columns (else one line under the grid)
 
+    def key_box(self, lines: int) -> tuple[int, int, int, int]:
+        """The box the key's `lines` entries take (with its "Key" header when it sits in the grid), x1/y1
+        exclusive; base_image draws the key inside it."""
+        x0, x1 = self.key_x
+        if self.key_in_grid:
+            top = self.key_y - self.head_h - self.cap_h * 0.9
+            bottom = self.key_y + (lines - 1) * round(self.cap_h * 1.4) + self.cap_h * 0.3
+        else:
+            top, bottom = self.key_y - self.cap_h * 0.6, self.key_y + self.cap_h * 0.3
+        return int(x0), int(top), int(np.ceil(x1)), int(np.ceil(bottom))
 
-def reel_layout(group_sizes: list[int], columns: int = MOTION.reel_columns, width: int = REEL_W) -> ReelLayout:
+
+def reel_layout(group_sizes: list[int], columns: int = MOTION.reel_columns, width: int = REEL_W,
+                height: int | None = None) -> ReelLayout:
+    """The reel's grid at a fixed width; its height follows from the grid. Given a `height` (the Quest reel's fixed
+    canvas), the tiles, and with them the group headers and captions, shrink in even steps until the grid and its
+    key fit; nothing is cropped, and what is left over (less than one step per row) stays under the grid."""
     margin = round(width * 0.025)
     col_w = (width - 2 * margin) / columns
     tile = int(col_w * 0.95) // 2 * 2
+    lay = _grid_layout(group_sizes, columns, width, tile)
+    if height is None:
+        return lay
+    if height % 2:
+        raise ValueError(f"reel height {height} must be even (yuv420p)")
+    while lay.size[1] > height and tile > 2:
+        tile -= 2
+        lay = _grid_layout(group_sizes, columns, width, tile)
+    if lay.size[1] > height:
+        raise ValueError(f"{len(lay.cells)} clips in {columns} columns do not fit a {width}x{height} reel")
+    return replace(lay, size=(width, height))
+
+
+def _grid_layout(group_sizes: list[int], columns: int, width: int, tile: int) -> ReelLayout:
+    """The grid at one tile size, at its natural (even) height."""
+    margin = round(width * 0.025)
+    col_w = (width - 2 * margin) / columns
     title_h = round(width * 0.07)
     head_h, cap_h = round(tile * 0.18), round(tile * 0.12)
     row_h = head_h + tile + cap_h
@@ -231,12 +303,40 @@ def clamp_contact(n: int, contact: int | None) -> int:
 def decode(video: Path, size: int) -> np.ndarray:
     """Every frame of a video as uint8 RGB (n, size, size, 3): scaled to cover the square, centre-cropped."""
     vf = f"scale={size}:{size}:force_original_aspect_ratio=increase:flags=area,crop={size}:{size}"
+    return _decode(video, vf, (size, size))
+
+
+def decode_fit(video: Path, size: tuple[int, int]) -> np.ndarray:
+    """Every frame of a video as uint8 RGB (n, h, w, 3) at size = (w, h) (fit_size: its own aspect, nothing cut)."""
+    return _decode(video, f"scale={size[0]}:{size[1]}:flags=area", size)
+
+
+def _decode(video: Path, vf: str, size: tuple[int, int]) -> np.ndarray:
+    w, h = size
     out = subprocess.run([_bin("ffmpeg"), "-v", "error", "-i", str(video), "-vf", vf, "-f", "rawvideo",
                           "-pix_fmt", "rgb24", "-"], check=True, capture_output=True).stdout
     frames = np.frombuffer(out, np.uint8)
-    if not frames.size or frames.size % (size * size * 3):
+    if not frames.size or frames.size % (w * h * 3):
         raise RuntimeError(f"{video.name}: no frames decoded")
-    return frames.reshape(-1, size, size, 3)
+    return frames.reshape(-1, h, w, 3)
+
+
+def fit_size(size: tuple[int, int], edge: int, even: bool = False) -> tuple[int, int]:
+    """(w, h) scaled so that its long edge is `edge`, aspect kept (even sides for an encoder's yuv420p)."""
+    s = edge / max(size)
+    q = 2 if even else 1
+    return tuple(max(q, round(v * s / q) * q) for v in size)
+
+
+def contain(frames: np.ndarray, t: int, paper: np.ndarray) -> np.ndarray:
+    """(n, h, w, 3) frames of at most t px a side, centred whole on (n, t, t, 3) square tiles padded with each
+    frame's own paper colour (n, 3): the paper-ratio compositing turns the padding into the reel's paper."""
+    n, h, w = frames.shape[:3]
+    out = np.empty((n, t, t, 3), np.uint8)
+    out[:] = np.clip(np.round(paper), 0, 255).astype(np.uint8)[:, None, None, :]
+    y0, x0 = (t - h) // 2, (t - w) // 2
+    out[:, y0:y0 + h, x0:x0 + w] = frames
+    return out
 
 
 H264 = ["-c:v", "libx264", "-preset", "slow", "-pix_fmt", "yuv420p", "-colorspace", "bt709",
@@ -245,9 +345,11 @@ TO_YUV = "scale=out_color_matrix=bt709:out_range=tv:flags=bicubic+accurate_rnd+f
 
 
 class Encoder:
-    """RGB frames piped into libx264 (written to a temp name, renamed when ffmpeg succeeds)."""
+    """RGB frames piped into libx264 (written to a temp name, renamed when ffmpeg succeeds); `x264` adds encoder
+    options (the Quest reel's profile and level)."""
 
-    def __init__(self, out: Path, size: tuple[int, int], fps: float, frames: int, crf: int = CRF):
+    def __init__(self, out: Path, size: tuple[int, int], fps: float, frames: int, crf: int = CRF,
+                 x264: tuple[str, ...] = ()):
         self.out = out
         self.tmp = out.with_name(f".{out.stem}.part{out.suffix}")
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -255,7 +357,7 @@ class Encoder:
         # one keyframe per loop: the grain of the static paper does not pulse at every GOP
         self.proc = subprocess.Popen(
             [_bin("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
-             "-s", f"{w}x{h}", "-r", f"{fps:g}", "-i", "-", "-an", "-vf", TO_YUV, *H264, "-crf", str(crf),
+             "-s", f"{w}x{h}", "-r", f"{fps:g}", "-i", "-", "-an", "-vf", TO_YUV, *H264, *x264, "-crf", str(crf),
              "-g", str(max(frames, 1)), str(self.tmp)], stdin=subprocess.PIPE)
 
     def write(self, frame: np.ndarray) -> None:
@@ -281,6 +383,7 @@ class Tile:
     box: tuple[int, int, int, int]
     source: str                   # painted | render
     resampled: tuple[int, int] | None = None
+    content: tuple[int, int] | None = None     # (h, w) of the clip's own picture centred in a padded tile (contain)
 
 
 def frame_paper(frames: np.ndarray) -> np.ndarray:
@@ -303,19 +406,39 @@ def resample(frames: np.ndarray, n: int) -> np.ndarray:
     return frames[np.round(np.linspace(0, len(frames) - 1, n)).astype(int)]
 
 
-def feather(t: int) -> np.ndarray:
-    """(t, t, 1) weight: 1 inside, easing to 0 at the tile's edges."""
+def feather(t: int, content: tuple[int, int] | None = None) -> np.ndarray:
+    """(t, t, 1) weight: 1 inside, easing to 0 at the tile's edges, or at the edges of a contained picture of
+    content = (h, w) centred in it (0 over the padding)."""
     n = max(2, round(t * FEATHER))
-    r = np.clip((np.arange(t, dtype=np.float32) + 0.5) / n, 0, 1)
-    r = np.minimum(r, r[::-1])
-    r = r * r * (3 - 2 * r)
-    return (r[:, None] * r[None, :])[..., None]
+
+    def ramp(k: int) -> np.ndarray:
+        r = np.clip((np.arange(k, dtype=np.float32) + 0.5) / n, 0, 1)
+        r = np.minimum(r, r[::-1])
+        return r * r * (3 - 2 * r)
+
+    if content is None or tuple(content) == (t, t):
+        r = ramp(t)
+        return (r[:, None] * r[None, :])[..., None]
+    h, w = content
+    out = np.zeros((t, t, 1), np.float32)
+    y0, x0 = (t - h) // 2, (t - w) // 2
+    out[y0:y0 + h, x0:x0 + w, 0] = ramp(h)[:, None] * ramp(w)[None, :]
+    return out
+
+
+def caption_lines(cfg: Config, n: int, fps: float) -> list[str]:
+    """A render-only reel's two caption lines; a variant's says whose captured strokes the character plays."""
+    strokes = f"{n} strokes captured from {cfg.athlete.name}" if cfg.character.variant else f"{n} captured strokes"
+    return [f"{strokes} · aligned on contact · real time, {fps:g} fps".upper(),
+            "3D renders of the game-ready character".upper()]
 
 
 def base_image(layout: ReelLayout, groups: list[tuple[str, list[ClipMotion]]], tiles: dict[str, Tile],
-               timing: ReelTiming, fps: float, painted: bool) -> tuple[Image.Image, dict]:
-    """The static reel: paper, title + caption, group labels with rules, clip captions with flag marks, the key,
-    the timeline's track and contact tick (returned for the moving dot)."""
+               timing: ReelTiming, fps: float, painted: bool, title: str,
+               lines: list[str] | None = None) -> tuple[Image.Image, dict]:
+    """The static reel: paper, title + caption (`lines`, default the painted / unpainted pair), group labels with
+    rules, clip captions with flag marks, the key, the timeline's track and contact tick (returned for the moving
+    dot, with the title's right edge and the caption's left edge)."""
     W, H = layout.size
     img = paper(layout.size, seed=17)
     d = ImageDraw.Draw(img)
@@ -323,15 +446,21 @@ def base_image(layout: ReelLayout, groups: list[tuple[str, list[ClipMotion]]], t
     th = layout.title_h
     name = compose._font(SERIF, round(th * 0.38))
     base_y = round(th * 0.56)
-    compose._text(d, (m, base_y), CARD["name"], name, INK)
-    x = m + compose._text_w(name, CARD["name"]) + th * 0.28
+    compose._text(d, (m, base_y), title, name, INK)
+    x = m + compose._text_w(name, title) + th * 0.28
     script = compose._font(SCRIPT, round(th * 0.4))
     d.text((x, base_y), "The Moveset in Motion", font=script, fill=INK_SOFT, anchor="ls")
-    sub = compose._font(SERIF, round(th * 0.11))
-    lines = [f"{len(tiles)} captured strokes · aligned on contact · real time, {fps:g} fps".upper(),
-             ("painted over 3D renders of the game-ready character" if painted
-              else "unpainted 3D renders of the game-ready character").upper()]
+    title_x1 = x + script.getlength("The Moveset in Motion")
+    lines = lines or [f"{len(tiles)} captured strokes · aligned on contact · real time, {fps:g} fps".upper(),
+                      ("painted over 3D renders of the game-ready character" if painted
+                       else "unpainted 3D renders of the game-ready character").upper()]
     tr = th * 0.012
+    size = round(th * 0.11)
+    sub = compose._font(SERIF, size)
+    while size > 6 and max(compose._text_w(sub, line, tr) for line in lines) > gx1 - title_x1 - th * 0.3:
+        size -= 1             # a long name or caption: the caption gives way rather than run into the title
+        sub = compose._font(SERIF, size)
+    caption_x0 = gx1 - max(compose._text_w(sub, line, tr) for line in lines)
     for i, line in enumerate(lines):
         x = gx1 - compose._text_w(sub, line, tr)
         compose._text(d, (x, th * (0.26 + 0.15 * i)), line, sub, INK_SOFT, tracking=tr)
@@ -407,7 +536,7 @@ def base_image(layout: ReelLayout, groups: list[tuple[str, list[ClipMotion]]], t
             ky += round(layout.cap_h * 1.4)
         else:
             kx = x_end + layout.cap_h * 1.4
-    return img, {"timeline": [tl_x0, tl_x1, tl_y]}
+    return img, {"timeline": [tl_x0, tl_x1, tl_y], "title_x1": title_x1, "caption_x0": caption_x0}
 
 
 def _dot(radius: float) -> tuple[np.ndarray, int]:
@@ -418,24 +547,25 @@ def _dot(radius: float) -> tuple[np.ndarray, int]:
 
 
 def render_reel(out: Path, base: Image.Image, tiles: list[Tile], timing: ReelTiming, fps: float,
-                timeline: list[float]) -> np.ndarray:
+                timeline: list[float], crf: int = CRF, x264: tuple[str, ...] = ()) -> np.ndarray:
     """Compose and encode every reel frame; returns the frame at the contact instant (the poster)."""
     canvas = np.asarray(base, np.uint8)
     W, H = base.size
     t_edge = tiles[0].frames.shape[1] if tiles else 0
-    alpha = feather(t_edge) if tiles else None
+    alphas = {tuple(c): feather(t_edge, c) for c in {t.content or (t_edge, t_edge) for t in tiles}}
     patches = [canvas[y0:y1, x0:x1].astype(np.float32) for x0, y0, x1, y1 in (t.box for t in tiles)]
     dot, dh = _dot(max(2.5, H / 520))
     ink = np.asarray(INK, np.float32)
     tl_x0, tl_x1, tl_y = timeline
     poster = None
-    enc = Encoder(out, (W, H), fps, timing.frames)
+    enc = Encoder(out, (W, H), fps, timing.frames, crf=crf, x264=x264)
     try:
         for t in range(timing.frames):
             frame = canvas.copy()
             for tile, patch in zip(tiles, patches, strict=True):
                 i, opacity = timing.source(t, len(tile.frames), tile.contact)
                 ratio = tile.frames[i].astype(np.float32) / np.maximum(tile.paper[i], 1.0)
+                alpha = alphas[tile.content or (t_edge, t_edge)]
                 x0, y0, x1, y1 = tile.box
                 frame[y0:y1, x0:x1] = np.clip(patch * (1 + alpha * opacity * (ratio - 1)), 0, 255).astype(np.uint8)
             x = round(tl_x0 + (tl_x1 - tl_x0) * t / max(timing.frames - 1, 1))
@@ -458,8 +588,31 @@ def poster_path(video: Path) -> Path:
     return video.with_suffix(".jpg")
 
 
-def tiles_dir(cfg: Config) -> Path:
-    return cfg.run.motion_dir / "rybakina_moveset_tiles"
+def tiles_dir(cfg: Config, profile: str = "web") -> Path:
+    suffix = "" if profile == "web" else f"_{profile}"
+    return cfg.run.motion_dir / f"{cfg.run.stem}_moveset_tiles{suffix}"
+
+
+def profile_reel(cfg: Config, profile: str) -> Path:
+    """A non-web profile's reel (its poster: poster_path)."""
+    return cfg.run.motion_dir / f"{cfg.run.stem}_moveset_reel_{profile}.mp4"
+
+
+def profile_report(cfg: Config, profile: str) -> Path:
+    return cfg.run.motion_dir / f"motion_{profile}.json"
+
+
+def _write_copy(frames: np.ndarray, out: Path, fps: float, contact: int | None, x264: tuple[str, ...] = ()) -> None:
+    """A light site copy of a clip (+ its frame at contact as the .jpg poster)."""
+    enc = Encoder(out, (frames.shape[2], frames.shape[1]), fps, len(frames), crf=CRF_WEB_COPY, x264=x264)
+    try:
+        for f in frames:
+            enc.write(f)
+    except BaseException:
+        enc.proc.kill()
+        raise
+    enc.close()
+    Image.fromarray(frames[clamp_contact(len(frames), contact)]).save(poster_path(out), quality=86, optimize=True)
 
 
 def _load_tile(clip: ClipMotion, size: int, fps: float, web: Path, painted: bool
@@ -471,20 +624,36 @@ def _load_tile(clip: ClipMotion, size: int, fps: float, web: Path, painted: bool
     if painted and clip.n_frames and len(frames) != clip.n_frames:
         resampled = (len(frames), clip.n_frames)
         frames = resample(frames, clip.n_frames)
-    out = web / f"{clip.id}{'_painted' if painted else ''}.mp4"
-    enc = Encoder(out, (frames.shape[2], frames.shape[1]), fps, len(frames), crf=23)
-    try:
-        for f in frames:
-            enc.write(f)
-    except BaseException:
-        enc.proc.kill()
-        raise
-    enc.close()
-    Image.fromarray(frames[clamp_contact(len(frames), clip.contact)]).save(poster_path(out), quality=86,
-                                                                          optimize=True)
+    _write_copy(frames, web / f"{clip.id}{'_painted' if painted else ''}.mp4", fps, clip.contact)
     if frames.shape[1] != size:
         frames = np.stack([cv2.resize(f, (size, size), interpolation=cv2.INTER_AREA) for f in frames])
     return frames, frame_paper(frames), resampled
+
+
+@dataclass
+class FitTile:
+    """A clip of any aspect decoded for a fixed-canvas reel: its frames contained in the square tile."""
+
+    frames: np.ndarray            # (n, T, T, 3) uint8, the picture centred whole, padded with its paper
+    paper: np.ndarray             # (n, 3) float32
+    content: tuple[int, int]      # (h, w) of the picture inside the tile
+    size: tuple[int, int]         # (w, h) of the full-size video
+    fps: float                    # its frame rate (ffprobe)
+
+
+def _load_fit(clip: ClipMotion, size: int, fps: float, web: Path) -> FitTile:
+    """A clip video decoded once at the site copy's size with its own aspect (TILE_WEB on the long edge), written
+    out as the light site copy (+ its frame at contact), then scaled to fit the reel's square tile whole and padded
+    with each frame's own paper colour (never cropped: a serve's racket at the top of a portrait frame stays)."""
+    p = probe(clip.render)
+    src = (p.width, p.height)
+    frames = decode_fit(clip.render, fit_size(src, max(size, TILE_WEB), even=True))
+    _write_copy(frames, web / f"{clip.id}.mp4", fps, clip.contact, x264=VUI_709)
+    w, h = fit_size(src, size)
+    if frames.shape[1:3] != (h, w):
+        frames = np.stack([cv2.resize(f, (w, h), interpolation=cv2.INTER_AREA) for f in frames])
+    bg = frame_paper(frames)
+    return FitTile(contain(frames, size, bg), bg, (h, w), src, p.fps)
 
 
 def _video_info(path: Path, size: tuple[int, int], timing: ReelTiming, fps: float) -> dict:
@@ -492,7 +661,13 @@ def _video_info(path: Path, size: tuple[int, int], timing: ReelTiming, fps: floa
             "duration_s": round(timing.frames / fps, 3), "mb": round(path.stat().st_size / 1e6, 2)}
 
 
-def run(cfg: Config) -> dict:
+def run(cfg: Config, profile: str = "web") -> dict:
+    """The reels of one render profile: `web` the painted + render pair at 1920 px wide, any other profile one
+    render-only reel on the Quest 3 canvas (module docstring)."""
+    return _run_web(cfg) if profile == "web" else _run_profile(cfg, profile)
+
+
+def _run_web(cfg: Config) -> dict:
     run_ = cfg.run
     groups = motion_clips(cfg)
     clips = [c for _, cs in groups for c in cs]
@@ -559,7 +734,7 @@ def run(cfg: Config) -> dict:
     }
     render_tiles = tiles_for(False)
     with step(f"moveset reel, 3D render ({layout.size[0]}x{layout.size[1]}, {timing.frames} frames)"):
-        base, extra = base_image(layout, groups, render_tiles, timing, fps, painted=False)
+        base, extra = base_image(layout, groups, render_tiles, timing, fps, painted=False, title=cfg.display_name)
         poster = render_reel(run_.moveset_reel_render, base, list(render_tiles.values()), timing, fps,
                              extra["timeline"])
         Image.fromarray(poster).save(poster_path(run_.moveset_reel_render), quality=88, optimize=True,
@@ -569,7 +744,7 @@ def run(cfg: Config) -> dict:
     n_painted = sum(t.source == "painted" for t in paint_tiles.values())
     if n_painted:
         with step(f"moveset reel, painted ({n_painted} of {len(paint_tiles)} tiles painted)"):
-            base, extra = base_image(layout, groups, paint_tiles, timing, fps, painted=True)
+            base, extra = base_image(layout, groups, paint_tiles, timing, fps, painted=True, title=cfg.display_name)
             poster = render_reel(run_.moveset_reel, base, list(paint_tiles.values()), timing, fps, extra["timeline"])
             Image.fromarray(poster).save(poster_path(run_.moveset_reel), quality=88, optimize=True, progressive=True)
     else:
@@ -600,4 +775,81 @@ def run(cfg: Config) -> dict:
         + (f", {len(missing)} missing" if missing else "") + f"), {timing.frames} frames = "
         f"{timing.frames / fps:.2f} s, contact at {timing.contact / fps:.2f} s, {layout.size[0]}x{layout.size[1]}, "
         f"{report['reel']['mb']} + {report['reel_render']['mb']} MB → {run_.motion_dir}")
+    return report
+
+
+def _run_profile(cfg: Config, profile: str) -> dict:
+    """One render-only reel of a non-web profile on the fixed REEL_EYE canvas, its site copies and its report."""
+    if profile not in PROFILES:
+        raise ValueError(f"unknown render profile {profile!r} (layout.PROFILES: {', '.join(PROFILES)})")
+    run_ = cfg.run
+    rdir = run_.motion_renders_for(profile)
+    renders = read_json(rdir / "renders.json") if (rdir / "renders.json").exists() else {}
+    if renders.get("profile") not in (None, profile):
+        log(f"[yellow]{rdir / 'renders.json'} says profile {renders['profile']!r}, composing it as {profile!r}[/]")
+    groups = motion_clips(cfg, rdir, painted=False, fps=PROFILES[profile].fps)
+    clips = [c for _, cs in groups for c in cs]
+    have = [c for c in clips if c.render]
+    if not have:
+        raise RuntimeError(f"no clip renders in {rdir}: run `r3d remote artwork motion-render --profile {profile}` "
+                           "first")
+    missing = [c.id for c in clips if not c.render]
+    if missing:
+        log(f"[yellow]{len(missing)} clips without a {profile} render, left out of the reel: {', '.join(missing)}[/]")
+    groups = [(s, cs) for s, cs in ((s, [c for c in cs if c.render]) for s, cs in groups) if cs]
+    layout = reel_layout([len(cs) for _, cs in groups], width=REEL_EYE[0], height=REEL_EYE[1])
+    T = layout.tile
+    fps_vals = [c.fps for c in have if c.fps]
+    fps = float(np.median(fps_vals)) if fps_vals else float(renders.get("fps") or PROFILES[profile].fps)
+
+    web = tiles_dir(cfg, profile)
+    web.mkdir(parents=True, exist_ok=True)
+    with step(f"decode {len(have)} {profile} clip renders (site copies at {TILE_WEB} px, reel tiles at {T} px)"):
+        with ThreadPoolExecutor(WORKERS) as pool:
+            fits = dict(zip((c.id for c in have), pool.map(lambda c: _load_fit(c, T, fps, web), have), strict=True))
+        for c in have:      # the reel is driven by the frames actually decoded
+            c.n_frames = len(fits[c.id].frames)
+        off = [f"{c.id} ({fits[c.id].fps:g})" for c in have if abs(fits[c.id].fps - fps) > fps * 0.01]
+        if off:             # every tile plays one source frame per reel frame
+            log(f"[yellow]{len(off)} clip videos not at the reel's {fps:g} fps play off real time: {', '.join(off)}[/]")
+        keep = {f"{c.id}{s}" for c in have for s in (".mp4", ".jpg")}
+        for p in web.iterdir():
+            if p.name not in keep:
+                p.unlink()
+    contacts = {c.id: clamp_contact(c.n_frames, c.contact) for c in have}
+    timing = reel_timing([(c.n_frames, contacts[c.id]) for c in have], fps)
+    tiles = {c.id: Tile(c, fits[c.id].frames, fits[c.id].paper, contacts[c.id], box, "render",
+                        content=fits[c.id].content) for c, box in zip(have, layout.boxes, strict=True)}
+
+    out = profile_reel(cfg, profile)
+    W, H = layout.size
+    with step(f"moveset reel, {profile} ({W}x{H}, {timing.frames} frames at {fps:g} fps, tiles {T} px)"):
+        base, extra = base_image(layout, groups, tiles, timing, fps, painted=False, title=cfg.display_name,
+                                 lines=caption_lines(cfg, len(tiles), fps))
+        poster = render_reel(out, base, list(tiles.values()), timing, fps, extra["timeline"], crf=CRF_EYE,
+                             x264=X264_EYE)
+        Image.fromarray(poster).save(poster_path(out), quality=90, optimize=True, progressive=True)
+
+    def rel(p: Path | None) -> str | None:
+        return str(p.relative_to(run_.root)) if p else None
+
+    report = {
+        "profile": profile,
+        "name": cfg.display_name,
+        "motion_from": cfg.athlete.name if cfg.character.variant else None,
+        "size": [W, H],
+        "fps": fps,
+        "reel": {"mp4": rel(out), "poster": rel(poster_path(out)), "frames": timing.frames,
+                 "loop_s": round(timing.frames / fps, 3), "mb": round(out.stat().st_size / 1e6, 2)},
+        "groups": [{"stroke": s, "clips": [c.id for c in cs]} for s, cs in groups],
+        "clips": [{"id": c.id, "stroke": c.stroke, "flagged": c.flagged, "mp4": rel(c.render), "poster": rel(c.poster),
+                   "tile": rel(web / f"{c.id}.mp4"), "tile_poster": rel(web / f"{c.id}.jpg"),
+                   "size": list(fits[c.id].size), "fps": c.fps or fps, "frames": c.n_frames,
+                   "contact_frame": contacts[c.id], "mb": round(c.render.stat().st_size / 1e6, 2)} for c in have],
+        "made": datetime.now().isoformat(timespec="seconds"),
+    }
+    write_json(profile_report(cfg, profile), report)
+    log(f"reel {profile}: {len(have)} clips" + (f" ({len(missing)} missing)" if missing else "")
+        + f", {timing.frames} frames = {timing.frames / fps:.2f} s at {fps:g} fps, contact at "
+        f"{timing.contact / fps:.2f} s, {W}x{H}, tiles {T} px, {report['reel']['mb']} MB → {out}")
     return report

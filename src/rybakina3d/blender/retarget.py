@@ -677,6 +677,51 @@ def _import_rig(path: str):
     return arm
 
 
+def weld_meshes(dist: float) -> dict:
+    """Merge coincident vertices of every skinned mesh. Some generators (Hi3D) ship each triangle with its own three
+    vertices: the surface then shades in facets and a bending knee tears into folds, while welded it deforms as one
+    skin. UVs live on the face corners, so they survive; the imported custom normals go and shading is smooth."""
+    import bmesh
+
+    out = {}
+    for o in [o for o in bpy.data.objects if o.type == "MESH" and any(m.type == "ARMATURE" for m in o.modifiers)]:
+        bm = bmesh.new()
+        bm.from_mesh(o.data)
+        n0 = len(bm.verts)
+        bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=dist)
+        bm.to_mesh(o.data)
+        bm.free()
+        if o.data.has_custom_normals:
+            with bpy.context.temp_override(object=o, active_object=o, selected_objects=[o]):
+                bpy.ops.mesh.customdata_custom_splitnormals_clear()
+        o.data.shade_smooth()
+        out[o.name] = {"vertices_before": n0, "vertices": len(o.data.vertices)}
+    return out
+
+
+def smooth_limb_weights(mapping: dict[str, str], repeat: int) -> list[str]:
+    """Spread the bend of knees and elbows over more of the limb: Laplacian-smooth the thigh/shin/foot and
+    upper-arm/forearm/hand weights (factor 0.5, `repeat` passes), then normalise. A hard step from one bone's
+    weight to the next folds the skin at a sharp line when the joint bends."""
+    joints = ("left_hip", "left_knee", "left_ankle", "right_hip", "right_knee", "right_ankle", "left_shoulder",
+              "left_elbow", "left_wrist", "right_shoulder", "right_elbow", "right_wrist")
+    names = [mapping[j] for j in joints if j in mapping]
+    done = []
+    for o in [o for o in bpy.data.objects if o.type == "MESH" and any(m.type == "ARMATURE" for m in o.modifiers)]:
+        bpy.ops.object.select_all(action="DESELECT")
+        o.select_set(True)
+        bpy.context.view_layer.objects.active = o
+        bpy.ops.object.mode_set(mode="WEIGHT_PAINT")
+        for n in names:
+            if n in o.vertex_groups:
+                o.vertex_groups.active_index = o.vertex_groups[n].index
+                bpy.ops.object.vertex_group_smooth(group_select_mode="ACTIVE", factor=0.5, repeat=repeat)
+        bpy.ops.object.vertex_group_normalize_all(group_select_mode="BONE_DEFORM", lock_active=False)
+        bpy.ops.object.mode_set(mode="OBJECT")
+        done.append(o.name)
+    return done
+
+
 def rig_from_blender(arm) -> Rig:
     bones = list(arm.data.bones)
     names = [b.name for b in bones]
@@ -728,7 +773,7 @@ def _fk_error_mm(arm, rig: Rig, res: dict, frame: int) -> float:
     return err * 1000
 
 
-def attach_racket(arm, rig: Rig, mapping: dict[str, str]) -> dict:
+def attach_racket(arm, rig: Rig, mapping: dict[str, str], colors: dict | None = None) -> dict:
     """Build the racket and parent it to the right-hand bone in an eastern forehand grip (rest pose)."""
     import racket
 
@@ -750,7 +795,7 @@ def attach_racket(arm, rig: Rig, mapping: dict[str, str]) -> dict:
     M[:3, 0], M[:3, 1], M[:3, 2] = np.cross(r, n), r, n  # racket +Y along the shaft, +Z = string normal
     M[:3, 3] = palm - r * GRIP_FROM_BUTT_M
 
-    obj = racket.build("Racket", arm.users_collection[0])
+    obj = racket.build("Racket", arm.users_collection[0], colors)
     obj.parent = arm
     obj.parent_type = "BONE"
     obj.parent_bone = hand
@@ -867,15 +912,24 @@ def build(job: dict) -> dict:
     fps = float(job.get("fps", 25.0))
     _reset_scene(fps)
     arm = _import_rig(job["rig"])
+    weld = weld_meshes(float(settings["weld_m"])) if settings.get("weld_m") else None
+    if weld:
+        _log("welded " + ", ".join(f"{k}: {v['vertices_before']} -> {v['vertices']} vertices" for k, v in weld.items()))
     rig = rig_from_blender(arm)
     mapping, map_info = map_bones(rig.names, rig.parents)
     missing = [j for j in ("pelvis", "left_hip", "right_hip", "left_knee", "right_knee", "left_shoulder",
                            "right_shoulder", "left_elbow", "right_elbow") if j not in mapping]
     if missing:
         raise RuntimeError(f"rig {job['rig']}: cannot map {missing} (bones: {rig.names})")
+    skin_fix = {}
+    if settings.get("smooth_limb_weights"):
+        skin_fix["weights_smoothed"] = smooth_limb_weights(mapping, int(settings["smooth_limb_weights"]))
+    if skin_fix:
+        _log(f"skin fixes: {skin_fix}")
     _log(f"rig: {len(rig.names)} bones, mapped {len(mapping)}/22, "
          f"unmapped bones {map_info['unmapped_bones']}")
-    racket_info = attach_racket(arm, rig, mapping) if settings.get("racket", True) else None
+    racket_info = (attach_racket(arm, rig, mapping, settings.get("racket_colors"))
+                   if settings.get("racket", True) else None)
 
     out = job["out"]
     joints_dir = Path(out["joints_dir"])
@@ -947,7 +1001,7 @@ def build(job: dict) -> dict:
                 "armature_scale": round(rig.obj_scale, 6)},
         "mapping": mapping, **map_info,
         "alignment": {"aligned_joints": list(align), "rest_angle_deg": angles},
-        "racket": racket_info, "clips": clips, "renders": renders,
+        "racket": racket_info, "weld": weld, "skin_fix": skin_fix, "clips": clips, "renders": renders,
         "outputs": {k: out[k] for k in ("glb", "fbx")},
         "blender": bpy.app.version_string, "seconds": round(time.time() - t0, 1),
     }

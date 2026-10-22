@@ -15,19 +15,23 @@ from .config import PROJECT_ROOT, Config
 from .util import log, secret, step
 
 # Made on the workstation, so a pull must never put an older host copy back: camera.npz/jpg, and every artwork
-# file except the renders (poses, the repaints and the composed sheets).
-WORKSTATION_ARTWORK = ["artwork/poses.json", "artwork/painted/", "artwork/rybakina_*", "artwork/artwork.json",
-                       "artwork/motion/painted/", "artwork/motion/rybakina_*", "artwork/motion/motion.json"]
+# file except the renders (poses, the repaints and the composed sheets). rsync patterns without a leading / match
+# at any depth, so they cover a character variant's variants/<name>/artwork/ as well; <stem>_* names the outputs.
+WORKSTATION_ARTWORK = ["artwork/poses.json", "artwork/painted/", "artwork/*_character_sheet*", "artwork/*_moveset_*",
+                       "artwork/artwork.json", "artwork/motion/painted/", "artwork/motion/*_moveset_*",
+                       "artwork/motion/motion.json", "artwork/motion/motion_*.json"]
 # the motion stage's PNG frames are host-side scratch: only its videos come back
 PULL_EXCLUDES = ["clips/*/clip.mp4", "clips/*/gvhmr/", "clips/*/camera.npz", "clips/*/camera.jpg", "source/",
                  "*.part.*", "anim/*.blend", "anim/*.blend1", "artwork/motion/frames/", *WORKSTATION_ARTWORK]
 # Clips are produced on the GPU host; only workstation-made calibrations travel back up.
 PUSH_FILTERS = ["--include=/clips/", "--include=/clips/*/", "--include=/clips/*/camera.npz",
                 "--exclude=/clips/*/*"]
-# the host renders from poses.json and needs none of the repaints or sheets
-PUSH_EXCLUDES = ["source/proxy.mp4", "source/audio16k.wav", "anim/", "site/", "*.part.*", "artwork/painted/",
-                 "artwork/rybakina_*", "artwork/artwork.json", "artwork/motion/painted/", "artwork/motion/rybakina_*",
-                 "artwork/motion/motion.json"]
+# the host renders from poses.json and needs none of the repaints or sheets; the clip videos and their renders.json
+# are made on the host, so an older workstation copy must never replace them (it would mark finished clips stale)
+PUSH_EXCLUDES = ["artwork/motion/render*/", "source/proxy.mp4", "source/audio16k.wav", "anim/", "site/", "*.part.*",
+                 "artwork/painted/", "artwork/*_character_sheet*", "artwork/*_moveset_*", "artwork/artwork.json",
+                 "artwork/motion/painted/", "artwork/motion/*_moveset_*", "artwork/motion/motion.json",
+                 "artwork/motion/motion_*.json"]
 
 
 def host(cfg: Config) -> str:
@@ -41,13 +45,18 @@ def _remote_run_dir(cfg: Config) -> str:
     return f"{cfg.remote.root}/{rel}"
 
 
+# a dropped workstation network must end a remote stage with an error, not leave ssh waiting on a dead connection
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6"]
+
+
 def _rsync(src: str, dst: str, excludes: list[str], filters: tuple[str, ...] = ()) -> None:
-    cmd = ["rsync", "-az", *filters] + [f"--exclude={e}" for e in excludes] + [src, dst]
+    cmd = ["rsync", "-az", "-e", shlex.join(["ssh", *SSH_OPTS]), *filters] + [f"--exclude={e}" for e in excludes] \
+        + [src, dst]
     subprocess.run(cmd, check=True)
 
 
 def ssh(cfg: Config, command: str) -> None:
-    subprocess.run(["ssh", "-o", "BatchMode=yes", host(cfg), command], check=True)
+    subprocess.run(["ssh", *SSH_OPTS, host(cfg), command], check=True)
 
 
 def push_code(cfg: Config) -> None:
@@ -112,8 +121,7 @@ for _ in $(seq 60); do
 done
 echo "no tunnel URL after 60 s: see ~/{root}/logs/tunnel.log" >&2; exit 1
 """
-        out = subprocess.run(["ssh", "-o", "BatchMode=yes", host(cfg), script], check=True, capture_output=True,
-                             text=True)
+        out = subprocess.run(["ssh", *SSH_OPTS, host(cfg), script], check=True, capture_output=True, text=True)
         url = out.stdout.strip().splitlines()[-1]
         log(f"review site → [bold]{url}[/] (served from {host(cfg)}:{port})")
     return url

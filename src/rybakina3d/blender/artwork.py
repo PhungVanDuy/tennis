@@ -71,6 +71,8 @@ WORLD = ((0.93, 0.89, 0.83), 0.3)    # warm paper-coloured ambient
 MATTE_RGB = (0.10, 0.10, 0.11)
 CHEST_WEIGHT = 3.0               # facing: shoulder line : hip line (see module docstring)
 EXPOSURE, LOOK = -0.75, "AgX - Medium High Contrast"
+WELD_M = 1e-5                    # smooth_skin: vertices closer than this are one
+SMOOTH_SKIN = (0.5, 10)          # smooth_skin: Corrective Smooth factor, iterations
 
 
 # ------------------------------------------------------------------------------------------------ numpy
@@ -112,6 +114,22 @@ def fit_frame(uv: np.ndarray, height_px: int, margins: tuple[float, float, float
     big = max(width, height_px)
     return {"width": width, "height": int(height_px), "f_px": f_px, "lens_mm": 24.0 / (v1 - v0),
             "sensor_height_mm": 24.0, "shift_x": cu * f_px / big, "shift_y": cv * f_px / big, "centre": (cu, cv)}
+
+
+def moves_with(obj, arm) -> bool:
+    """Whether a mesh object is part of the figure: skinned (an armature modifier), or parented to the armature
+    or one of its bones, directly or through other objects (a rigid visor, hair piece or earring on the head bone
+    moves with her but has no modifier). Duck-typed on .type / .modifiers / .parent, so it tests without bpy."""
+    if obj.type != "MESH":
+        return False
+    if any(m.type == "ARMATURE" for m in obj.modifiers):
+        return True
+    parent = obj.parent
+    while parent is not None:
+        if parent == arm:
+            return True
+        parent = parent.parent
+    return False
 
 
 def to_pixels(uv: np.ndarray, frame: dict) -> np.ndarray:
@@ -161,9 +179,11 @@ class Studio:
         bpy.ops.import_scene.gltf(filepath=job["glb"])
         self.arm = next(o for o in bpy.data.objects if o.type == "ARMATURE")
         self.racket = next((o for o in bpy.data.objects if o.type == "MESH" and o.name.startswith("Racket")), None)
-        self.body = [o for o in bpy.data.objects if o.type == "MESH" and any(m.type == "ARMATURE" for m in o.modifiers)]
-        for o in list(bpy.data.objects):  # the importer's bone-shape icosphere, a unit sphere at the origin
-            if o.type == "MESH" and o is not self.racket and o not in self.body:
+        self.body = [o for o in bpy.data.objects if o != self.racket and moves_with(o, self.arm)]
+        for o in list(bpy.data.objects):
+            # whatever else is a mesh does not move with her: the importer's bone-shape icosphere (a unit sphere at
+            # the origin); lights a character GLB may carry would change the sheet's lighting
+            if (o.type == "MESH" and o != self.racket and o not in self.body) or o.type == "LIGHT":
                 bpy.data.objects.remove(o)
         self.bones = job["bones"]
         ad = self.arm.animation_data or self.arm.animation_data_create()
@@ -171,6 +191,8 @@ class Studio:
             track.mute = True
         settings = job.get("settings", {})   # samples, plus look-dev overrides of the constants below
         self.chest_weight = float(settings.get("chest_weight", CHEST_WEIGHT))
+        if settings.get("smooth_skin"):
+            self._smooth_skin()
         self.device = self._render_settings(settings)
         self._world(float(settings.get("world", WORLD[1])))
         self.floor = self._floor()
@@ -184,6 +206,26 @@ class Studio:
         scene.camera = self.cam
 
     # ---------------------------------------------------------------------------------------- setup
+    def _smooth_skin(self) -> None:
+        """Softer joints for close renders: dual-quaternion skinning (no volume lost where a knee or elbow bends)
+        and a Corrective Smooth over the deformation only (rest shape from the original coordinates, so modelled
+        detail stays). Coincident vertices are welded first: smoothing a mesh whose triangles are separate
+        tears it into spikes."""
+        import bmesh
+
+        for o in self.body:
+            bm = bmesh.new()
+            bm.from_mesh(o.data)
+            bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=WELD_M)
+            bm.to_mesh(o.data)
+            bm.free()
+            for m in o.modifiers:
+                if m.type == "ARMATURE":
+                    m.use_deform_preserve_volume = True
+            cs = o.modifiers.new("SmoothSkin", "CORRECTIVE_SMOOTH")
+            cs.factor, cs.iterations = SMOOTH_SKIN
+            cs.smooth_type, cs.rest_source = "LENGTH_WEIGHTED", "ORCO"
+
     def _render_settings(self, settings: dict) -> dict:
         scene = self.scene
         scene.render.engine = "CYCLES"

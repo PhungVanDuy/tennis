@@ -1,0 +1,22 @@
+# The art team's Naomi Osaka character on Elena Rybakina's captured moveset: same footage, clips and motion
+# (runs/rybakina), its own character, animation and artwork under runs/rybakina/variants/naomi/.
+extends: rybakina.yaml
+
+character:
+  variant: naomi
+  name: Naomi Osaka
+  height_m: 1.80
+  refs_dir: artexamplesfortennisnaomiosaka   # the art team's renders (kept out of the repo)
+  mesh_primary: hi3d                         # face and hair closest to the art (A/B'd against Hunyuan3D 3.1 Pro)
+  racket_colors:                             # the art direction's racket: charcoal frame, lime-green strings
+    frame: [0.03, 0.035, 0.035]
+    grip: [0.02, 0.02, 0.025]
+    strings: [0.40, 0.64, 0.19]
+
+models:
+  mesh: ""                                   # no Meshy 7.1 generator (looked like clay); its rigging endpoint still rigs
+  mesh_alt: hitem3d/hi3d/v3.0/multi-view-to-3d   # Hi3D v3.0, 8K maps (Hunyuan3D 3.1 Pro and Meshy 7.1 were tried)
+
+retarget:                                    # the auto-rig's knees fold at the back when bent (docs/character.md)
+  weld_m: 1.0e-5                             # Hi3D ships every triangle with its own vertices: weld them
+  smooth_limb_weights: 20

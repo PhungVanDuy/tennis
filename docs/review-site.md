@@ -1,6 +1,6 @@
 # Review site
 
-The review site is a local, static single-page website over one run folder. A reviewer uses it to check every stage's result side by side: the footage index, each stroke clip as broadcast video, GVHMR overlay and retargeted 3D character in sync, the character and its meshes, the character sheet and atlas, the moveset in motion, and the run's limitations. This document explains how `r3d site` builds it (`src/rybakina3d/site.py`), how `r3d serve` serves it, how `r3d publish` shares it from the GPU host, what each tab shows and which files it reads, how the front-end in `web/` is organised, how to check it headlessly, and how to extend it. For the run folder and the stages that produce the data, see [architecture.md](architecture.md). For what the artwork itself is, see [artwork.md](artwork.md). For running the pipeline, see [setup.md](setup.md).
+The review site is a local, static single-page website over one run folder. A reviewer uses it to check every stage's result side by side: the footage index, each stroke clip as broadcast video, GVHMR overlay and retargeted 3D character in sync, the character and its meshes, the character sheet and atlas, the moveset in motion, any character variant's Quest 3 renders, and the run's limitations. This document explains how `r3d site` builds it (`src/rybakina3d/site.py`), how `r3d serve` serves it, how `r3d publish` shares it from the GPU host, what each tab shows and which files it reads, how the front-end in `web/` is organised, how to check it headlessly, and how to extend it. For the run folder and the stages that produce the data, see [architecture.md](architecture.md). For what the artwork itself is, see [artwork.md](artwork.md). For running the pipeline, see [setup.md](setup.md).
 
 ## Build and serve
 
@@ -32,7 +32,7 @@ runs/rybakina/site/
 
 `_Linker` is the single gateway from the run folder to the page. `link(src, rel)` returns the page URL `media/<rel>`, or `None` when `src` does not exist, so a missing file turns into a pending box rather than a broken link. Each link is created under a temporary name and moved over the old one with `os.replace`, which is atomic. Links that the current build did not write are pruned only at the end. As a result, a running `r3d serve` never answers 404 for a file that exists while the site is being rebuilt. Because the links are relative, the whole run folder can be moved without breaking them.
 
-Nothing heavy is copied: the workstation keeps one copy of every video. There is one deliberate exception. The In motion grid would choke a browser if it played dozens of 1024 px videos at once, so `artwork motion-compose` writes light 360 px copies (`TILE_WEB = 360`) into `artwork/motion/rybakina_moveset_tiles/`. The site links those copies when they are at least as new as the clip's render or repaint. Otherwise it links the full video (`site._fresh`).
+Nothing heavy is copied: the workstation keeps one copy of every video. There is one deliberate exception. The In motion grid would choke a browser if it played dozens of 1024 px videos at once, so `artwork motion-compose` writes light 360 px copies (`TILE_WEB = 360`) into `artwork/motion/rybakina_moveset_tiles/`. The site links those copies when they are at least as new as the clip's render or repaint. Otherwise it links the full video (`site._fresh`). A character variant's section works the same way with `<variant>_moveset_tiles_<profile>/` (336 x 360 copies of the portrait renders), except that a tile older than its render is still played and counted as stale ([Character variants](#character-variants)). Its files are linked under `media/variants/<name>/…`.
 
 For videos, `_video()` also runs `ffprobe` to record `start` (where the first frame sits on the media timeline, because previews with audio start one frame late), the frame count and the size. The player uses `start` to line the videos up.
 
@@ -50,6 +50,7 @@ At the time of writing (2026-10-22), `site/` holds about 3 MB of real files (`da
 | `character` | `character/refs/refs.json`, `sheet/stylize.json`, `mesh/mesh.json`, `glb_stats` of every GLB, `rigged.glb` | Overview, Character |
 | `moveset` | `anim/rybakina_moveset.glb` / `.fbx` (links + `glb_stats`), `anim/retarget.json`, `anim/checks/` | Character, Moveset, Artwork |
 | `artwork` | `artwork/artwork.json`, sheet PNGs and their JPEG previews, `artwork/poses.json`; `motion`: `artwork/motion/render/renders.json`, `motion/painted/<clip>.json` and `paint.json`, `motion/motion.json` | Artwork |
+| `variants[]` | per folder in `variants/`: `artwork/motion/motion_<profile>.json` and `render_<profile>/renders.json` for `quest3` and `draft`, the tile copies, the variant's moveset GLB / FBX (links + `glb_stats`), and the `configs/*.yaml` that names the variant | Artwork |
 | `qa_summary` | `qa_summary.json` | Notes |
 | `curation` | `curation.json`, with each clip's current QA gate | Overview, Moveset, Footage |
 | `signature` | `signature.json` | Overview, Moveset |
@@ -175,6 +176,7 @@ The review area for the selected clip contains:
 ### Artwork
 
 - A header with download buttons for the moveset GLB and FBX.
+- **One section per character variant**, when the run folder has any ([Character variants](#character-variants)). With a variant present, the In motion header names the athlete ("In motion — Elena Rybakina").
 - **In motion** (from `artwork motion-render`, `motion-paint` and `motion-compose`):
   - a header with the counts (clips rendered, painted, flagged) and a *Painted* / *3D render* toggle (painted is disabled until at least one clip is painted);
   - the moveset reel, centred;
@@ -194,6 +196,40 @@ Sources: `artwork` (from `artwork.json`, `poses.json` and the motion reports). A
 - All 39 clip videos and the turntable are rendered: 1024 × 1024 px, 25 fps, Cycles at 48 samples, about 59 minutes of rendering on one A100.
 - The reel is 1920 × 2114 px and loops every 5.2 s, with every contact on the frame at 3.0 s.
 - **Painted motion:** `artwork motion-paint` was still running when this was written, and the reel had not been rebuilt since, so it showed the 3D render on every tile ([artwork.md](artwork.md#motion-paint) has a snapshot). *Maintainer: replace this sentence with the final count of accepted painted clips and their IoU range from `runs/rybakina/artwork/motion/painted/paint.json`.*
+
+#### Model comparison
+
+Side-by-side videos in `<run>/compare/` (`site._comparisons`, newest first) open the Artwork tab when there are any: one clip rendered with two characters or settings, everything else equal. A `<name>.json` beside a video may give its `title` and `note`; a `<name>.jpg` is its poster. They are linked under `media/compare/` like any other run file, so a site rebuild keeps them.
+
+#### Character variants
+
+A variant is another character on the same captured motion, under `variants/<name>/` in the run folder ([character.md](character.md#5-a-character-drawn-by-the-art-team-the-naomi-variant)). `site._variants` lists every folder in `variants/` that has a moveset GLB, an FBX or an `artwork/motion/` folder; a variant whose character is still being built has no section yet. The section shows its moveset in motion at the Quest 3 render profile, render only ([artwork.md](artwork.md#4-render-profiles-the-quest-3-set)).
+
+**Which profile is live.** `VARIANT_PROFILES = ("quest3", "draft")`. The live profile is the first of the two whose reel report (`motion_<profile>.json`) holds every moveset clip, else the first with any reel report, else the first with any rendered clip. A complete draft reel therefore keeps playing while `quest3` renders batch by batch, and the Quest 3 reel takes over once it holds the whole moveset. Meanwhile every clip whose `quest3` video already exists links that video instead of its draft (`profile: "quest3"` on the clip, `n_hires` on the variant); its grid link reads "2064×2208 ↗" in the accent colour, the others "draft ↗".
+
+What the section shows:
+
+- A header "<name> — Quest 3" with the counts (clips rendered of the moveset, the render size, "per eye" on `quest3`, the frame rate, the clips flagged by curate), a chip for the live profile (*Quest 3 renders*, *Draft preview* or *Pending*), and download buttons for the variant's moveset GLB and FBX with their size and number of animations.
+- A short text: the variant playing the athlete's moveset, rendered in Cycles at 2064 × 2208 and 60 fps, render only, every contact on one reel frame.
+- The reel, which plays while it is on screen. Its caption gives size, frame rate, loop length, a download link with the file size and a full-size link.
+- **Every clip**, grouped by stroke in the atlas order, as portrait tiles at the render's aspect. Hovering a tile plays it (a tap on a touch screen), one at a time, because even the light copies of a 2064 × 2208 grid are dozens of decoders. A click, `Enter` or `Space` opens the full-resolution video in the lightbox with its stroke, size, frame rate, frame count and contact frame and a link to the clip in the Moveset tab. "full ↗" opens the full-resolution video directly. The grid itself never loads the full-resolution videos.
+
+**Partial results.** Renders arrive clip by clip, so the section links whatever exists:
+
+- The clips come from the live profile's reel report merged with its `renders.json`. A clip rendered after the last compose appears in its place in the atlas order, with its poster.
+- Before the first compose of the live profile, the grid shows every rendered clip's poster and a note gives the `motion-compose` command.
+- A composed clip without a tile yet shows its poster ("poster · tile pending"). A clip not rendered yet shows "render pending".
+- With the draft live and `quest3` renders already back, a note says how many Quest 3 clips are rendered and which command makes their reel.
+- The commands shown carry `R3D_CONFIG=<the variant's config>`, found by scanning `configs/*.yaml` for one with that `character.variant` (`site._variant_config`).
+
+**Stale flags.**
+
+| Flag | Set when | Shown as |
+|---|---|---|
+| `reel_stale` | the reel is older than any linked clip render, or it holds fewer clips than are rendered (`n_in_reel` against `n_rendered`) | a note "The reel predates the latest renders (it holds N of the M rendered clips)" with the `motion-compose` command |
+| `tile_stale` (per clip), `n_tiles_stale` | a tile copy is older than its clip's render | the tile still plays; a note says how many tiles predate a re-render and that the full-resolution link is current |
+
+The data is `variants[]` in `site.json`: per variant `variant`, `name`, `motion_from`, `config`, `profile` (live), `composed`, `size`, `fps`, `reel` (`url`, `poster`, `size_mb`, `size`, `frames`, `fps`, `loop_s`), `reel_stale`, `groups`, `clips` (`id`, `stroke`, `profile`, `flagged`, `mp4`, `mb`, `poster`, `tile`, `tile_poster`, `tile_stale`, `size`, `fps`, `frames`, `contact_frame`), the counts `n_clips`, `n_rendered`, `n_hires`, `n_tiles`, `n_tiles_stale`, `n_flagged`, `n_in_reel`, `progress` (per profile: `rendered`, `composed`, `size`), `downloads`, `made` and `updated`. `r3d site` logs each variant's progress, for example `Naomi Osaka: 39/39 clips (draft)`.
 
 ### Footage
 
@@ -233,6 +269,10 @@ find -L runs/rybakina/site/media -type l
 # stage status straight from the data
 .venv/bin/python -c "import json; d = json.load(open('runs/rybakina/site/data/site.json')); \
 print([(s['id'], s['status']) for s in d['pipeline']])"
+
+# each variant: live profile, clips rendered, clips in the moveset, stale reel
+.venv/bin/python -c "import json; d = json.load(open('runs/rybakina/site/data/site.json')); \
+print([(v['variant'], v['profile'], v['n_rendered'], v['n_clips'], v['reel_stale']) for v in d['variants']])"
 ```
 
 To check that the page boots and renders, use headless Chrome. Set `CHROME` to `google-chrome` or `chromium` on Linux, or to the binary inside the app bundle on macOS. The `--virtual-time-budget` gives the modules, `site.json` and the GLB time to load.
@@ -248,9 +288,9 @@ grep -o 'pnode status-[a-z]*' dom.html | sort | uniq -c   # pipeline nodes by st
 
 If `site.json` cannot be loaded, the `#boot` element stays and shows "Could not load the run data". The screenshot command renders the three synced views, WebGL included, in current headless Chrome.
 
-For scripted checks, from DevTools or a browser automation tool, the page exposes `window.r3dReview`. It returns `data()` (the parsed `site.json`), `state` (the current tab and clip), `moveset()` (the moveset player, for example `r3dReview.moveset().tl.frame`) and `character()` (the character viewer).
+For scripted checks, from DevTools or a browser automation tool, the page exposes `window.r3dReview`. It returns `data()` (the parsed `site.json`), `state` (the current tab and clip), `moveset()` (the moveset player, for example `r3dReview.moveset().tl.frame`), `character()` (the character viewer) and `variants()` (the variant sections' playback state: the reels on screen and the tile playing).
 
-The Python side is covered by `tests/test_artwork_motion_compose.py::test_site_motion_block`. It builds the In motion block over a temporary run, checks the URLs it produces, and checks that every linked file really exists in the site. The front-end has no automated tests.
+The Python side is covered by `tests/test_artwork_motion_compose.py::test_site_motion_block`, which builds the In motion block over a temporary run, checks the URLs it produces, and checks that every linked file really exists in the site, and by `tests/test_site_variants.py`, which does the same for a fake variant: what exists is linked, the draft is live until the Quest 3 reel is composed, clips rendered after a partial compose keep the atlas order, and `build()` writes `variants` into `site.json`. The front-end has no automated tests.
 
 ## Extending the site
 
@@ -275,4 +315,5 @@ The Python side is covered by `tests/test_artwork_motion_compose.py::test_site_m
 - **It is not live.** Statuses and notes are as of the last `r3d site`. Rebuild and reload to see new results.
 - **`r3d serve` is local only.** It binds to `127.0.0.1`, and `media/` holds symlinks, so copying `site/` alone copies dangling links (`rsync -aL` would dereference them, about 200 MB). The site shows client reference material and broadcast previews, which is why `site/` and `runs/` are gitignored. Share it through `r3d publish` only with people who may see that material.
 - **The 3D views need WebGL.** Without it, the 3D panes show a message while the videos and every other view still work.
-- **One run per site.** The site shows the run folder of the loaded config (`--config` or `R3D_CONFIG`).
+- **One run per site.** The site shows the run folder of the loaded config (`--config` or `R3D_CONFIG`). Build it with the default config: the variants in that run folder's `variants/` get their sections whichever config is loaded, but a variant's config would put the variant's character, moveset and artwork paths in the main tabs.
+- **A variant shows only its moveset in motion.** Its section has the Quest 3 or draft reel, the clips and the GLB / FBX downloads. Its character, references, sheet and atlas are not on the site.

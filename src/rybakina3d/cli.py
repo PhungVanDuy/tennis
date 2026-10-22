@@ -23,6 +23,7 @@ app.add_typer(artwork_app, name="artwork")
 ConfigOpt = Annotated[Path | None, typer.Option("--config", "-c", help="Pipeline YAML (default configs/rybakina.yaml)")]
 ClipsOpt = Annotated[list[str] | None, typer.Option("--clip", help="Limit to these clip ids (repeatable)")]
 ForceOpt = Annotated[bool, typer.Option("--force", help="Recompute even if outputs exist")]
+ProfileOpt = Annotated[str, typer.Option("--profile", help="Render profile (layout.PROFILES): web | quest3 | draft")]
 
 
 def _cfg(config: Path | None) -> Config:
@@ -149,6 +150,14 @@ def character_mesh(config: ConfigOpt = None, force: ForceOpt = False):
     run(_cfg(config), force=force)
 
 
+@character_app.command("face")
+def character_face(config: ConfigOpt = None):
+    """Project the art team's headshot onto the rig's face and bake it into the base colour (art-team variants)."""
+    from .character.face import run
+
+    run(_cfg(config))
+
+
 @artwork_app.command("poses")
 def artwork_poses(config: ConfigOpt = None):
     """Resolve every sheet slot to a clip, frame and camera from the captured motion."""
@@ -182,11 +191,12 @@ def artwork_compose(config: ConfigOpt = None):
 
 
 @artwork_app.command("motion-render")
-def artwork_motion_render(config: ConfigOpt = None, force: ForceOpt = False):
+def artwork_motion_render(config: ConfigOpt = None, clip: ClipsOpt = None, profile: ProfileOpt = "web",
+                          force: ForceOpt = False):
     """Render every clip (+ a turntable) as a video in the sheet's look from the moveset GLB (GPU host)."""
     from .artwork.motion_render import run
 
-    run(_cfg(config), force=force)
+    run(_cfg(config), force=force, only=clip, profile=profile)
 
 
 @artwork_app.command("motion-paint")
@@ -198,11 +208,11 @@ def artwork_motion_paint(config: ConfigOpt = None, force: ForceOpt = False):
 
 
 @artwork_app.command("motion-compose")
-def artwork_motion_compose(config: ConfigOpt = None):
+def artwork_motion_compose(config: ConfigOpt = None, profile: ProfileOpt = "web"):
     """The moveset reel: every clip in a grid, aligned on contact (painted where accepted + an all-render twin)."""
     from .artwork.motion_compose import run
 
-    run(_cfg(config))
+    run(_cfg(config), profile=profile)
 
 
 @app.command()

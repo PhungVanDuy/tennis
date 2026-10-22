@@ -14,6 +14,7 @@ Camera: azimuth in degrees around the character relative to the way she faces in
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 SHEET_SIZE = (3840, 2560)        # px, 3:2 like the reference
@@ -109,3 +110,62 @@ class Motion:
 
 
 MOTION = Motion()
+
+
+@dataclass(frozen=True)
+class RenderProfile:
+    """One way `artwork motion-render` renders and encodes the clip videos; each profile has its own output folder
+    (RunLayout.motion_renders_for) and PNG frames (artwork/motion/frames/ for web, frames/<name>/ otherwise).
+
+    The camera angle and framing rule, the lights, the floor and the look are MOTION's for every profile; a profile
+    only sets the frame (size), the time base (fps), the noise budget (samples) and the encoding. The actions stay
+    keyed at the clips' rate (25 fps); another fps samples them in between (see blender/artwork_motion.frame_times).
+    """
+
+    name: str
+    size: tuple[int, int]            # (w, h) px
+    fps: float                       # output frame rate, real time
+    samples: int                     # Cycles samples per pixel (adaptive sampling, then OIDN)
+    turntable: bool = False          # also the idle-pose turntable video
+    matte: bool = False              # also the matte video (motion-paint's pose check reads it)
+    crf: int = 18
+    matte_crf: int = 12
+    preset: str = "slow"             # libx264
+    x264: tuple[str, ...] = ()       # extra libx264 output options (profile, level)
+    keep_frames: bool = True         # keep the PNG frames on the host after encoding (a re-encode then skips Blender)
+    smooth_skin: bool = False        # dual-quaternion skinning + Corrective Smooth (blender/artwork.py _smooth_skin)
+
+    @property
+    def scale(self) -> float:
+        """Linear size relative to MOTION.size (the web frame, which the pixel constants of motion_render were
+        tuned on): px distances (shadow fade, dilations) scale by it, so a profile's frame looks the same."""
+        return math.sqrt(self.size[0] * self.size[1] / (MOTION.size[0] * MOTION.size[1]))
+
+
+BT709_VUI = ("-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709")
+
+PROFILES: dict[str, RenderProfile] = {
+    # the review site's videos and motion-paint's input. Samples below MOTION.samples (64): 2681 frames at 64 take
+    # ~65 min on the A100 (path tracing is GPU-bound, ~1.3 s a frame); at 48 the whole run fits in an hour and,
+    # after OIDN, a frame differs from 64's by 0.7/255 on average
+    "web": RenderProfile("web", MOTION.size, 25.0, min(MOTION.samples, 48), turntable=True, matte=True),
+    # Meta Quest 3, one eye's panel (2064 x 2208, portrait). 60 fps: the headset refreshes at 72/90/120 Hz, where
+    # 25 fps judders. 16 samples: each pixel covers 1/4.3 of a web pixel's share of the figure, so per unit of
+    # picture this is still ~1.4x web's sample budget (16 x 4.3 vs 48), and OIDN's residual blotches are half the
+    # angular size; the fixed seed keeps the floor still, and each frame's noise is visible only 1/60 s.
+    # Measured on the A100 (backhand_14m19s) at 32 samples: no visible noise at 1:1, 4.2 s Cycles + 0.64 s matte a
+    # frame, ~8.2 h for the moveset's 6065 frames; 16 halves the Cycles share, which matters on a GPU shared with
+    # other jobs (it ran 1.7x slower while another process used it).
+    # CRF 16 (finer than web's 18: a headset magnifies), High profile, level 5.2 (2064 x 2208 at 60 fps is 1.07 M
+    # macroblocks/s, above 5.1's 0.98 M), BT.709 primaries / transfer / matrix in the stream's VUI (ffmpeg's
+    # -color_primaries / -color_trc do not reach it through the scale filter: web's videos carry only the matrix
+    # and range). No turntable, no matte video: this profile is render-only, never painted
+    # Its frames are dropped once encoded: ~3.2 MB a frame, ~19 GB for the moveset, on a shared host's disk.
+    "quest3": RenderProfile("quest3", (2064, 2208), 60.0, 16, crf=16, preset="slow",
+                            x264=("-profile:v", "high", "-level:v", "5.2", *BT709_VUI), keep_frames=False,
+                            smooth_skin=True),
+    # a fast preview of quest3: the same camera, framing and timing at 1/4 linear size, few samples; its tiles
+    # compose into the same reel layout
+    "draft": RenderProfile("draft", (516, 552), 60.0, 16, crf=18, preset="medium",
+                           x264=("-profile:v", "high", *BT709_VUI), smooth_skin=True),
+}

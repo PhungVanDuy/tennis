@@ -159,6 +159,54 @@ The grip is an eastern forehand grip in the rest pose. The racket axis is turned
 
 The red frame is the only saturated red in a render. The painted-motion racket check in [artwork.md](artwork.md#motion-paint) relies on that.
 
+## 5. A character drawn by the art team: the Naomi variant
+
+The same 39 captured strokes can drive a second character. `configs/naomi.yaml` `extends` the Rybakina config and sets `character.variant: naomi`, so footage, clips, curation and the SMPL motions stay shared, while `character/`, `anim/` and `artwork/` live under `runs/rybakina/variants/naomi/` with `naomi_*` file names (`RunLayout.out` and `RunLayout.stem` in `config.py`). Every stage takes `-c configs/naomi.yaml`; `r3d remote` needs `R3D_CONFIG=configs/naomi.yaml` instead so the host runs the same config. The run order for a variant is in [setup.md](setup.md#a-character-variant), and its moveset rendered for Meta Quest 3 in [artwork.md](artwork.md#4-render-profiles-the-quest-3-set).
+
+The art team already designed this character, so nothing is invented from photos. Their renders (`character.refs_dir`, kept out of the repository) are the references, listed with the outfit text the view prompts quote in a manifest beside them, `<refs_dir>/refs.yaml` (`{outfit: str, refs: [{name, role, file, note}]}`, read by `character/art.py` `manifest`), so neither their file names nor the design's description are in the code:
+
+| Reference | Role | Used for |
+|---|---|---|
+| `art_front` | front | the A-pose front render (1715 x 2515, alpha cut-out): the front view itself; Meshy's texture guide |
+| `art_action` | style | the character in action: outfit and hair from another angle (side and back views) |
+| `art_head_front/left/right/back` | head | 2000 x 2000 head renders: face and skull in profile; the front one is the face stage's source |
+
+The head renders show the face with a different hairstyle and top than the full-body art; they only contribute the face.
+
+| Step | Command (`-c configs/naomi.yaml`) | Model / tool | Output (under `variants/naomi/character/`) |
+|---|---|---|---|
+| References | `r3d character refs` | copy (`character/art.py`, `ART_REFS`) | `refs/*.png`, `refs.json` |
+| Views | `r3d character stylize` | GPT Image 2.5 Sunburst (`models.image_paint`), 2 candidates per view | `sheet/attempts/`, `sheet/{back,left,right}.png`, `sheet/views/*.png`, `stylize.json` |
+| Mesh + rig | `r3d character mesh` | Hitem3D Hi3D v3.0 (`models.mesh_alt`) rigged by `fal-ai/meshy/rigging`, primary (`character.mesh_primary: hi3d`); no Meshy generator (`models.mesh: ""`) | `mesh/hi3d/`, `mesh.json`, `rigged.glb` |
+| Face (optional, not used for Naomi) | `r3d character face` | Blender (local) + OpenCV YuNet | `face/*`, `rigged.glb` with the new base colour |
+
+**Views.** The art team's front is the front view. Sunburst draws the back first, then each side, on the front's canvas size (1648 x 2416) with a transparent background, from the front, the action art and two head renders; the back joins the references of both sides so hair and outfit agree around the figure. `PICK` in `art.py` overrides the first candidate. Each figure is cut out by alpha, scaled to the front's figure height, feet on one line, and centred on a square light-grey canvas; `facing.json` is written directly, so the Gemini side-view check is skipped.
+
+**Mesh.** Three generators were tried on the same four views, each rigged by the same Meshy rigging endpoint (`_rig`, the 24-joint skeleton `retarget` already maps), and compared under the artwork's studio light:
+
+| Generator | Call | Result |
+|---|---|---|
+| Meshy 7.1 | `fal-ai/meshy/v7.1/multi-image-to-3d`, as for Rybakina plus `geometry_resolution: 2k`, `texture_image_url` = the art front, 50,000 quads | 98,392 triangles, 2048 x 2048 maps, ~8 min on fal. Reads as clay: lumpy hair, ridged visor, a pale blotchy face |
+| Hunyuan3D 3.1 Pro | `fal-ai/hunyuan-3d/v3.1/pro/image-to-3d`: `input/back/left/right_image_url`, `enable_pbr`, `face_count` 200,000 (`_hunyuan`) | 199,986 triangles, 4096 x 4096 base colour, metal-roughness and normal maps, <3 min. Crisp pleats and ruffle, clean visor, real hair volume; a generic face |
+| **Hi3D v3.0** (primary) | `hitem3d/hi3d/v3.0/multi-view-to-3d`: `front/back/left/right_image_url`, `resolution: 2048quality`, `enable_texture`, `enable_pbr`, `face_count` 280,000 (`_hi3d`; Hi3D advises 2M, Meshy rigging takes ~300k at most) | 280,000 triangles, 8192 x 8192 base colour and metal-roughness, ~9.5 min on fal plus ~3 min rigging. The face, brows and hair closest to the art, the shoe logos legible |
+
+The deciding test rendered `backhand_14m19s` at the `quest3` profile with the Hunyuan and the Hi3D rig and put them side by side (full frame and a 1:1 window that follows the figure). Hi3D was chosen for the face and hair; Hunyuan's skin is smoother. The earlier outputs are kept out of the run's `variants/` in `runs/rybakina/archive/naomi_hunyuan/` (Hunyuan: draft set, 8 `quest3` clips) and `archive/naomi_hi3d_test/` (the one-clip test).
+
+**Face** (`character/face.py`, `blender/face_project.py`), written for the Meshy rig, whose face came out pale and blotchy from a ~250 px face lit from the front. On Meshy it helps; on Hunyuan it did not: Hunyuan's face shape differs from the art's, so the projected features landed beside its own (doubled lips, a streak along the cheek). Naomi's `rigged.glb` is Hi3D's rig as rigged, without this stage. What the stage does:
+1. evens the skin (`even_skin`): skin texels lighter than the body's median skin lightness are pulled towards it (Lab L 178 on the face against 134 on the body in this run), keeping `SKIN_KEEP` = 35 % of their excess;
+2. renders the rest-pose head unlit through a front orthographic camera at 2048 px;
+3. finds eyes, nose tip and mouth corners with YuNet (`weights/yunet/face_detection_yunet_2023mar.onnx`, from opencv_zoo) in that render and in the front headshot, and maps the headshot onto it with a similarity transform (landmark residual 10.5 px at a 263 px eye distance);
+4. keeps only the headshot's detail (`delight`): its low frequencies below 0.2 x the eye distance are replaced by the rig's own shading blurred at 0.6 x, so their studio light and skin tone leave no seam;
+5. masks a face oval (brows to chin) to the render's skin pixels and to the headshot's own skin inset by 0.2 x the eye distance (its face outline would otherwise project as an edge), feathers it, and bakes the projection (front-facing corners only) into a base colour of at least 4096 px with Cycles, which replaces the original image in the GLB (`gltf.replace_image`).
+
+Re-running `character mesh` puts the untouched rig back, so when the stage is used, run it after `mesh` and before `retarget`.
+
+**Racket.** `character.racket_colors` (linear RGB `frame`, `grip`, `strings`) reaches `blender/racket.py` through the retarget job: the art direction's charcoal frame with lime strings instead of Rybakina's red.
+
+**Knees.** Hi3D ships every triangle with its own three vertices (839,998 vertices for 280,000 triangles). Skinned like that the surface shades in facets and a bending knee tears into folds behind the joint, on Hunyuan's mesh too once rigged by the same endpoint. `retarget` therefore welds coincident vertices of every skinned mesh before anything else (`weld_meshes`, `retarget.weld_m` = 1e-5 m: 139,998 vertices here, UVs kept on the face corners, smooth shading), so the moveset GLB and FBX carry the welded mesh. Naomi's config also smooths the limb weights (`retarget.smooth_limb_weights: 20`: 20 Laplacian passes at factor 0.5 over the thigh, shin, foot, upper-arm, forearm and hand groups, then normalised), which spreads a bend over more of the limb; the `quest3` and `draft` renders add dual-quaternion skinning and a Corrective Smooth ([artwork.md](artwork.md), `smooth_skin`). Each step was judged on close-ups of three bent-knee frames of `backhand_14m19s`: welding plus the render-time smoothing removed the faceting and most of the fold, the weight smoothing softened the bend further. Moving the rig's knee joints to the middle of the leg (they sit 2.7 and 3.7 cm towards the kneecap) made the shin notch on the inside and was dropped.
+
+Known issues: the face is the generator's reading of a ~250 px face, close to the art but not its exact features (the art team's own model file would settle that); on Hi3D's mesh the white of the top's armhole stretches onto the upper arm when the arm swings forward (Meshy's auto-weights at the armhole); the ponytail and skirt have no bones of their own and follow the head and thighs.
+
 ## Inspecting the outputs
 
 Run `.venv/bin/r3d site` and `.venv/bin/r3d serve`, then open http://127.0.0.1:8765/#/character. The page has a 3D viewer (switch between the Meshy and Tripo results and their variants, pick an animation, show the bones, turntable), statistics for the loaded model, and a Meshy-vs-Tripo table. Below that are the style sheet (hero, turnaround, the four views labelled by the side of her they show, and both prompts with their model) and every reference grouped by role.

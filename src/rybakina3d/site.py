@@ -5,7 +5,9 @@ skeleton file per recovered clip under data/motion/) and exposes every media fil
 overlays, track / camera checks, character images, meshes, the moveset, retarget checks, the artwork sheets) as a
 *relative symlink* under media/. Nothing heavy is copied (the workstation disk is small) and the run folder stays
 relocatable. A missing output is written as null and the page shows it as pending, so the site can be
-rebuilt at any point while stages are still running.
+rebuilt at any point while stages are still running. Every character variant of the run (variants/<name>/: another
+character on the same motion) is listed under `variants` with its moveset in motion at the Quest 3 render profile
+(its reel, every clip's full-resolution video and light tile) or, until those exist, the profile's draft.
 
 serve() is a threaded static server for that folder: it follows the symlinks, sends the right MIME types
 (model/gltf-binary for .glb) and answers Range requests with 206 so Chrome can seek inside <video>.
@@ -16,6 +18,7 @@ from __future__ import annotations
 import math
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import zipfile
@@ -27,9 +30,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 
 from .camera import CALIBRATED_VIEWS
-from .config import PROJECT_ROOT, ClipLayout, Config
+from .config import PROJECT_ROOT, ClipLayout, Config, RunLayout
 from .curate import OVERHEAD_MIN_RISE_M, SWING_MIN_SPEED_MS
 from .gltf import glb_stats
 from .media import _bin
@@ -499,7 +503,7 @@ def _stats(path: Path) -> dict | None:
         return None
     try:
         return glb_stats(path)
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError, struct.error) as e:  # struct.error: a GLB cut short (still being written)
         log(f"[yellow]{path.name}: {e}[/]")
         return None
 
@@ -713,6 +717,219 @@ def _artwork_motion(cfg: Config, link: _Linker) -> dict | None:
                    "video_paint": paint_rep.get("model") or cfg.models.video_paint},
         "updated": _mtime(run.motion_report, run.motion_renders / "renders.json", run.motion_painted / "paint.json"),
     }
+
+
+# --- character variants --------------------------------------------------------------------------------
+# A variant is another character on the same captured motion (run.root/variants/<name>/, see RunLayout). The page
+# shows its moveset in motion from the best render profile (artwork/layout.py PROFILES) that has anything: the
+# Quest 3 deliverable, else the quarter-size draft of the same framing. A reel that holds the whole moveset beats a
+# partial one, any reel report beats bare renders, and a clip's quest3 video replaces its draft as soon as it exists.
+VARIANT_PROFILES = ("quest3", "draft")
+
+
+def _first(*paths: Path | None) -> Path | None:
+    return next((p for p in paths if p is not None and p.exists()), None)
+
+
+def _report_path(root: Path, folder: Path, value: Any) -> Path | None:
+    """A path from a report: run-root relative when it has a folder, else a name inside the stage's folder."""
+    if not isinstance(value, str) or not value:
+        return None
+    return root / value if "/" in value else folder / value
+
+
+def _rows(report: Any) -> dict[str, dict]:
+    """renders.json / motion_<profile>.json clip rows as {clip id: row}, kept as a mapping or a list of rows."""
+    clips = report.get("clips") if isinstance(report, dict) else None
+    if isinstance(clips, list):
+        return {r["id"]: r for r in clips if isinstance(r, dict) and isinstance(r.get("id"), str)}
+    return {k: v for k, v in clips.items() if isinstance(v, dict)} if isinstance(clips, dict) else {}
+
+
+def _variant_config(cfg: Config, variant: str) -> tuple[str | None, str | None]:
+    """(display name, project-relative config path) of the configs/*.yaml that builds this variant, if any: one on
+    this run folder first, else any with that variant name."""
+    found = []
+    for i, p in enumerate(sorted((PROJECT_ROOT / "configs").glob("*.yaml"))):
+        try:
+            c = Config.load(p)
+        except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):  # not a config (or a broken one)
+            continue
+        if c.character.variant == variant:
+            found.append((c.run_dir.resolve() != cfg.run_dir.resolve(), i, c.display_name,
+                          p.relative_to(PROJECT_ROOT).as_posix()))
+    return min(found)[2:] if found else (None, None)
+
+
+def _comparisons(cfg: Config, link: _Linker) -> list[dict]:
+    """Side-by-side videos in <run>/compare/ (one clip rendered with two characters or settings), newest first; a
+    <name>.json beside a video may give its "title" and "note"."""
+    d = cfg.run.root / "compare"
+    out = []
+    for mp4 in sorted(d.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True) if d.is_dir() else []:
+        meta = m if isinstance(m := _maybe_json(mp4.with_suffix(".json")), dict) else {}
+        poster = mp4.with_suffix(".jpg")
+        out.append({"id": mp4.stem, "title": meta.get("title") or mp4.stem.replace("_", " "),
+                    "note": meta.get("note"), "video": _video(link, mp4, f"compare/{mp4.name}"),
+                    "poster": link(poster, f"compare/{poster.name}") if poster.exists() else None})
+    return out
+
+
+def _variants(cfg: Config, link: _Linker) -> list[dict]:
+    """Every character variant in the run folder with its moveset or anything in motion yet (a variant whose
+    character is still being built has nothing to show here)."""
+    d = cfg.run.root / "variants"
+    names = sorted(p.name for p in d.iterdir() if p.is_dir() and not p.name.startswith(".")) if d.is_dir() else []
+    return [v for name in names if (v := _variant(cfg, link, name))]
+
+
+def _variant(cfg: Config, link: _Linker, name: str) -> dict | None:
+    """One variant's moveset in motion (`artwork motion-render` / `motion-compose --profile quest3|draft`).
+
+    The live profile is the first of VARIANT_PROFILES whose reel report (motion_<profile>.json) holds every moveset
+    clip, else the first with a reel report, else the first with renders: while quest3 renders batch by batch, the
+    complete draft reel stays up. Its clips come from the report merged with renders.json, so clips rendered after
+    the last compose show up too; each is linked as the full-resolution video + poster and, when motion-compose
+    made one, the light tile + its poster (the grid only ever plays the tiles). A clip whose quest3 video already
+    exists links that one instead of the live profile's (`profile` says which). Results arrive progressively:
+    whatever exists is linked, the rest is None, and `progress` counts the renders of every profile."""
+    run = RunLayout(cfg.run.root, name)
+    root = run.root
+    if not any(p.exists() for p in (run.moveset_glb, run.moveset_fbx, run.motion_dir)):
+        return None
+    label, config = _variant_config(cfg, name)
+
+    def rel(src: Path) -> str:
+        try:
+            return src.relative_to(root).as_posix()
+        except ValueError:  # a report pointing outside the run folder: still linked, under the variant
+            return f"variants/{name}/{src.name}"
+
+    def media(src: Path | None) -> str | None:
+        return link(src, rel(src)) if src else None
+
+    reports, renders, progress = {}, {}, {}
+    for p in VARIANT_PROFILES:
+        rdir = run.motion_renders_for(p)
+        reports[p] = rep if isinstance(rep := _maybe_json(run.motion_dir / f"motion_{p}.json"), dict) else None
+        renders[p] = r if isinstance(r := _maybe_json(rdir / "renders.json"), dict) else {}
+        done = {cid for cid, row in _rows(renders[p]).items()
+                if _first(_report_path(root, rdir, row.get("video") or row.get("mp4")), rdir / f"{cid}.mp4")}
+        # a clip's video exists before renders.json lists it (the report is written when the whole run ends)
+        done |= {f.stem for f in rdir.glob("*.mp4") if not f.stem.endswith("_matte")} if rdir.is_dir() else set()
+        progress[p] = {"rendered": len(done), "composed": reports[p] is not None,
+                       "size": renders[p].get("size") or (reports[p] or {}).get("size")}
+    moveset = set(run.kept_clip_ids())
+    whole = {p for p in VARIANT_PROFILES if reports[p] and moveset
+             and moveset <= {cid for cid, r in _rows(reports[p]).items() if r.get("mp4")}}
+    live = (next((p for p in VARIANT_PROFILES if p in whole), None)
+            or next((p for p in VARIANT_PROFILES if reports[p]), None)
+            or next((p for p in VARIANT_PROFILES if progress[p]["rendered"]), None))
+    rep = reports.get(live) or {}
+    rend = renders.get(live) or {}
+    downloads = {"glb": _file(link, run.moveset_glb, rel(run.moveset_glb)),
+                 "fbx": _file(link, run.moveset_fbx, rel(run.moveset_fbx)),
+                 "animations": len(stats.get("animations") or []) if (stats := _stats(run.moveset_glb)) else None}
+    out: dict[str, Any] = {
+        "variant": name, "name": rep.get("name") or label or name.replace("_", " ").title(),
+        "motion_from": rep.get("motion_from") or cfg.athlete.name, "config": config,
+        # the clips' render size: the report's `size` is its reel's, the fixed 2064 x 2208 canvas even for the draft
+        "profile": live, "composed": bool(rep), "size": rend.get("size") or rep.get("size"),
+        "fps": rend.get("fps") or rep.get("fps"), "reel": None, "reel_stale": False, "groups": [], "clips": [],
+        "n_clips": 0, "n_rendered": 0, "n_tiles": 0, "n_tiles_stale": 0, "n_flagged": 0, "n_in_reel": None,
+        "progress": progress, "downloads": downloads, "made": rep.get("made"),
+        "updated": _mtime(*(run.motion_dir / f"motion_{p}.json" for p in VARIANT_PROFILES),
+                          *(run.motion_renders_for(p) / "renders.json" for p in VARIANT_PROFILES)),
+    }
+    if live is None:
+        return out
+
+    from .artwork.compose import _atlas_groups
+    from .artwork.layout import PROFILES
+
+    rdir = run.motion_renders_for(live)
+    tdir = run.motion_dir / f"{run.stem}_moveset_tiles_{live}"
+    rep_rows, rend_rows = _rows(rep), _rows(rend)
+    # every moveset clip in the atlas order (strokes in ATLAS.stroke_order, clips in curation order), which is the
+    # reel's: motion-compose lays out the same groups minus the clips it had no render for, so a clip rendered since
+    # the last compose takes its place among them instead of trailing its group (or its stroke trailing the others).
+    # The reel's stroke for a clip wins if it differs (curation changed since).
+    atlas = _atlas_groups(cfg, dict.fromkeys([*run.kept_clip_ids(), *rend_rows, *rep_rows]))
+    flagged = {c["id"]: c["flagged"] for _, cs in atlas for c in cs}
+    stroke_of = {c["id"]: s for s, cs in atlas for c in cs}
+    for g in rep.get("groups") or []:
+        if isinstance(g, dict) and isinstance(g.get("clips"), list) and isinstance(g.get("stroke"), str):
+            stroke_of.update({c: g["stroke"] for c in g["clips"] if isinstance(c, str)})
+    rank = {s: i for i, (s, _) in enumerate(atlas)}
+    groups: dict[str, list[str]] = {}
+    for cid in stroke_of:
+        groups.setdefault(stroke_of[cid], []).append(cid)
+    groups = dict(sorted(groups.items(), key=lambda g: rank.get(g[0], len(rank))))
+
+    size, fps = out["size"], out["fps"]
+    best = VARIANT_PROFILES[0]
+    best_dir, best_rows = run.motion_renders_for(best), _rows(renders.get(best) or {})
+    clips, sources = [], []
+    for stroke, ids in groups.items():
+        for cid in ids:
+            r, row = rep_rows.get(cid) or {}, rend_rows.get(cid) or {}
+            mp4 = _first(_report_path(root, rdir, r.get("mp4")),
+                         _report_path(root, rdir, row.get("video") or row.get("mp4")), rdir / f"{cid}.mp4")
+            poster = _first(_report_path(root, rdir, r.get("poster")), _report_path(root, rdir, row.get("poster")),
+                            rdir / f"{cid}.jpg")
+            source = live
+            hi = (_first(_report_path(root, best_dir, (best_rows.get(cid) or {}).get("video")), best_dir / f"{cid}.mp4")
+                  if live != best else None)
+            if hi:  # the deliverable is already there for this clip: link it, with its own facts
+                source, mp4, row, r = best, hi, best_rows.get(cid) or {"size": progress[best]["size"]}, {}
+                poster = _first(_report_path(root, best_dir, row.get("poster")), hi.with_suffix(".jpg")) or poster
+            tile = _first(_report_path(root, tdir, r.get("tile")), tdir / f"{cid}.mp4")
+            tile_poster = _first(_report_path(root, tdir, r.get("tile_poster")), tdir / f"{cid}.jpg")
+            f = _file(link, mp4, rel(mp4)) if mp4 else None
+            sources += [mp4] if f else []
+            clips.append({
+                "id": cid, "stroke": r.get("stroke") or stroke, "profile": source if mp4 else None,
+                "flagged": bool(r["flagged"]) if "flagged" in r else flagged.get(cid, False),
+                "mp4": f["url"] if f else None, "mb": f["size_mb"] if f else None,
+                "poster": media(poster), "tile": media(tile), "tile_poster": media(tile_poster),
+                # a tile older than its render shows an earlier render of the same clip: still played, but noted
+                "tile_stale": bool(tile and mp4 and not _fresh(tile, mp4)),
+                # the full-resolution video's own facts (renders.json describes the file linked as mp4, also after a
+                # re-render the report has not seen), else the report's; frames at the profile's rate (60 fps)
+                "size": row.get("size") or r.get("size") or (list(PROFILES[source].size) if source != live else size),
+                "fps": row.get("fps") or r.get("fps") or (PROFILES[source].fps if source != live else fps),
+                "frames": row.get("n_frames") or row.get("frames") or r.get("frames"),
+                "contact_frame": next((x for x in (row.get("contact_frame"), r.get("contact_frame")) if x is not None),
+                                      None),
+            })
+    reel_info = rep.get("reel") if isinstance(rep.get("reel"), dict) else {}
+    reel_mp4 = _first(_report_path(root, run.motion_dir, reel_info.get("mp4")),
+                      run.motion_dir / f"{run.stem}_moveset_reel_{live}.mp4")
+    if reel_mp4:
+        v = _video(link, reel_mp4, rel(reel_mp4)) or {}
+        frames = v.get("frames") or reel_info.get("frames")
+        reel_fps = reel_info.get("fps") or rep.get("fps") or fps
+        loop = reel_info.get("loop_s") or (round(frames / reel_fps, 3) if frames and reel_fps else None)
+        out["reel"] = {
+            "url": v.get("url"), "poster": media(_first(_report_path(root, run.motion_dir, reel_info.get("poster")),
+                                                         reel_mp4.with_suffix(".jpg"))),
+            "size_mb": round(reel_mp4.stat().st_size / 1e6, 2),
+            "size": [v["width"], v["height"]] if v.get("width") and v.get("height") else rep.get("size") or size,
+            "frames": frames, "fps": reel_fps, "loop_s": loop,
+        }
+        # the reel holds what was rendered when it was composed
+        in_reel = [cid for cid, r in rep_rows.items() if r.get("mp4")]
+        out["n_in_reel"] = len(in_reel) if rep_rows else None
+        out["reel_stale"] = (not _fresh(reel_mp4, *sources)
+                             or (out["n_in_reel"] is not None and len(sources) > len(in_reel)))
+    out.update(
+        groups=[{"stroke": s, "clips": ids} for s, ids in groups.items()],
+        clips=clips, n_clips=len(clips), n_rendered=sum(bool(c["mp4"]) for c in clips),
+        n_hires=sum(c["profile"] == best for c in clips),
+        n_tiles=sum(bool(c["tile"]) for c in clips), n_tiles_stale=sum(c["tile_stale"] for c in clips),
+        n_flagged=sum(bool(c["flagged"]) for c in clips),
+    )
+    return out
 
 
 # --- pipeline ------------------------------------------------------------------------------------------
@@ -1057,6 +1274,9 @@ def _copy_web(site: Path) -> int:
 
 
 def build(cfg: Config) -> Path:
+    if cfg.character.variant:  # the shared site would show the variant's character as the run's
+        raise ValueError(f"the review site is the run's: build it with the base config, not the variant "
+                         f"{cfg.character.variant!r} (its section is read from variants/ either way)")
     run = cfg.run
     site = run.site_dir
     run.ensure(site / "data")
@@ -1082,6 +1302,8 @@ def build(cfg: Config) -> Path:
             "character": _character(cfg, link),
             "moveset": _moveset(cfg, link, checks),
             "artwork": _artwork(cfg, link),
+            "variants": _variants(cfg, link),
+            "comparisons": _comparisons(cfg, link),
             "qa_summary": _maybe_json(run.qa_summary),
             "curation": cur_summary,
             "signature": sig,
@@ -1095,8 +1317,10 @@ def build(cfg: Config) -> Path:
         link.prune()
         n_motion = sum(bool(c["motion"]) for c in clips)
         kept = f", {cur_summary['kept']} kept by curate" if cur_summary else ""
+        variants = "".join(f", {v['name']}: {v['n_rendered']}/{v['n_clips']} clips ({v['profile'] or 'pending'})"
+                           for v in d["variants"])
         log(f"{n_web} web files, {link.count} media links, {len(clips)} clips ({n_motion} with motion{kept}), "
-            f"{d['footage']['n_shots']} shots → {site}")
+            f"{d['footage']['n_shots']} shots{variants} → {site}")
     return site
 
 

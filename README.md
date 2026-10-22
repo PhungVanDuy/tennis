@@ -10,6 +10,12 @@ One Typer CLI, `r3d`, has one sub-command per stage. Stages that call hosted API
 understanding and for the stylized character images, fal for image, 3D and video models) run on the workstation.
 GPU stages run on a remote Linux host through `r3d remote <stage>`.
 
+The same captured strokes can drive a second character. `configs/naomi.yaml` builds the art team's Naomi Osaka
+character as a *variant* of this run (under `runs/rybakina/variants/naomi/`) and plays Rybakina's moveset on it.
+Its deliverable is the moveset rendered for Meta Quest 3: every clip at one eye's 2064×2208 and 60 fps, render
+only, plus a reel of all clips on the same canvas. See [docs/character.md](docs/character.md#5-a-character-drawn-by-the-art-team-the-naomi-variant)
+and [docs/artwork.md](docs/artwork.md#4-render-profiles-the-quest-3-set).
+
 ## Results
 
 These numbers come from the current run (`runs/rybakina/`, 2026-10-22). The run folder is not in the repository
@@ -31,6 +37,8 @@ videos.
 | Moveset atlas | `artwork/rybakina_moveset_atlas.png`, 3840×2560: all 39 clips at contact, grouped by stroke, flagged clips marked |
 | Motion videos | 39 clip videos and a turntable, 1024×1024 at 25 fps (Cycles, 48 samples, about 59 min on one A100). The moveset reel `artwork/motion/rybakina_moveset_reel.mp4` is 1920×2114, a 5.2 s loop with all contacts aligned |
 | Painted motion | the full `motion-paint` run was still in progress when this was written (snapshot in [docs/artwork.md](docs/artwork.md#motion-paint)). During development, a smoke test on one forehand gave per-frame silhouette IoU median 0.96 (p10 0.90) and racket recall 1.0. **Placeholder, maintainer to replace from `artwork/motion/painted/paint.json` (`accepted`, `n`, `cost_usd`): N of 39 clips accepted, USD X.** The reel uses the render for every tile that has no accepted painted clip |
+| Naomi variant | `variants/naomi/anim/naomi_moveset.glb` (16.07 MB) and `.fbx` (21.82 MB): the same 39 animations on the art team's Naomi Osaka, built from their renders (front + three Sunburst views) by Hi3D v3.0 and Meshy's auto-rig, 280,416 triangles with the racket, 24 bones, vertices welded (840k → 140k) so knees bend as one skin. Meshy 7.1 and Hunyuan3D 3.1 Pro were tried first ([docs/character.md](docs/character.md#5-a-character-drawn-by-the-art-team-the-naomi-variant)) |
+| Quest 3 set | render profile `quest3`: 2064×2208, 60 fps, 16 samples, H.264 High@5.2, CRF 16, render only. Measured on one A100 at 32 samples, before the profile was set to 16: 4.2 s Cycles + 0.64 s matte a frame, so the moveset's 6,065 frames take about 8.2 h; a 2.3 s clip is about 1.35 MB. The `draft` profile (516×552, 16 samples) previews it. `quest3` and `draft` render with `smooth_skin` (dual-quaternion skinning + Corrective Smooth). Naomi's Hi3D set renders in batches on the GPU host (`DETACH=1 scripts/render_quest3.sh`); at the time of writing it was in progress |
 
 ## How it works
 
@@ -109,7 +117,7 @@ ssh "$R3D_HOST"                                   # then, on the host:
 
 # 5. run every stage in order (FROM=<stage> resumes)
 scripts/run_pipeline.sh
-# the moving artwork is not part of run_pipeline.sh: run it by hand
+# its artwork stage ends with the moving artwork; to run only that part:
 .venv/bin/r3d remote artwork motion-render
 .venv/bin/r3d artwork motion-paint
 .venv/bin/r3d artwork motion-compose
@@ -118,14 +126,18 @@ scripts/run_pipeline.sh
 # 6. review at http://127.0.0.1:8765
 .venv/bin/r3d serve
 
-# tests (132; no GPU, Blender, network or private inputs) and lint. Tests that encode video skip without ffmpeg
+# a character variant's Quest 3 set: render, compose and publish in batches (docs/setup.md#a-character-variant)
+scripts/render_quest3.sh
+
+# tests (164; no GPU, Blender, network or private inputs) and lint. Tests that encode video skip without ffmpeg
 .venv/bin/pytest -q && .venv/bin/ruff check src tests
 ```
 
 ## Stages
 
 `.venv/bin/r3d --help`, `r3d character --help` and `r3d artwork --help` list the commands. All outputs are
-under `runs/rybakina/` (`run_dir` in `configs/rybakina.yaml`).
+under `runs/rybakina/` (`run_dir` in `configs/rybakina.yaml`). A variant's `character/`, `anim/` and `artwork/`
+outputs are under `runs/rybakina/variants/<name>/`, with `<name>_` in place of `rybakina_` (`<stem>` below).
 
 | Stage | Where | Models / tools | What it does | Output |
 |---|---|---|---|---|
@@ -136,6 +148,7 @@ under `runs/rybakina/` (`run_dir` in `configs/rybakina.yaml`).
 | `character refs` | workstation | PyMuPDF, Wikimedia Commons API | collects identity and style references from the client deck, the sheet screenshot and four Commons photos | `character/refs/` |
 | `character stylize` | workstation | `gemini-3-pro-image` | generates a front A-pose hero in the target style, then a four-view turnaround conditioned on the hero, and cuts the views out | `character/sheet/` |
 | `character mesh` | workstation | fal `fal-ai/meshy/v7.1/multi-image-to-3d` (primary, with built-in rig); `tripo3d/h3.1/multiview-to-3d` + `fal-ai/meshy/rigging` (A/B) | builds a quad mesh at the `target_tris` budget and a humanoid auto-rig | `character/mesh/`, `character/rigged.glb` |
+| `character face` | workstation | Blender (local), OpenCV YuNet | optional, for an art-team variant: projects the art team's front headshot onto the rig's face and bakes it into the base colour (not used for Naomi) | `character/face/`, `character/rigged.glb` |
 | `clips` | GPU host | ffmpeg | makes frame-exact cuts: a model copy (every source frame, restamped at 30 fps) and a 720p review copy at the source rate | `clips/<id>/clip.json`, `clip.mp4` (stays on the host), `preview.mp4` |
 | `track` | GPU host | YOLO11x + ByteTrack | picks her track by the hitter box, repairs id switches, interpolates and smooths | `clips/<id>/track.npz`, `track.jpg` |
 | `camera` | workstation | numpy / OpenCV, ITF court model | calibrates per-frame focal length and pose from the court lines on `preview.mp4`, with a fixed-centre clip bundle. Only `main_broadcast` and `behind_low` views are calibrated | `clips/<id>/camera.npz`, `camera.jpg` |
@@ -148,33 +161,35 @@ under `runs/rybakina/` (`run_dir` in `configs/rybakina.yaml`).
 | `artwork render` | GPU host | Blender Cycles (OptiX, 128 samples) | renders each slot and every clip at contact as RGBA with a soft contact shadow, plus a figure-only matte | `artwork/renders/` |
 | `artwork paint` | workstation | fal `openai/gpt-image-2.5/sunburst/edit` | repaints each paintable figure in the reference style. A repaint is accepted only when its silhouette matches the render (`ACCEPT_IOU = 0.85`); otherwise the render stays | `artwork/painted/` |
 | `artwork compose` | workstation | Pillow | lays out the sheet like `naomi_style.png`, a render-only twin and the moveset atlas | `artwork/rybakina_character_sheet.png`, `rybakina_character_sheet_render.png`, `rybakina_moveset_atlas.png`, `artwork.json` |
-| `artwork motion-render` | GPU host | Blender Cycles (48 samples), ffmpeg | renders every clip's action and a turntable over the sheet's paper, with a matte video for the pose check | `artwork/motion/render/` (PNG frames stay on the host) |
+| `artwork motion-render` | GPU host | Blender Cycles (48 samples), ffmpeg | renders every clip's action and a turntable over the sheet's paper, with a matte video for the pose check. `--profile quest3` renders the clips at 2064×2208, 60 fps, 16 samples instead (render only; `draft` is a quarter-size preview), `--clip` limits the clips | `artwork/motion/render/`, `render_quest3/`, `render_draft/` (PNG frames stay on the host) |
 | `artwork motion-paint` | workstation | fal: GPT Image 2.5 Sunburst (frame 0), `fal-ai/bernini-r/reference-edit-video`, `fal-ai/birefnet/v2/video` (matting) | paints frame 0 like a sheet figure and carries it through the clip with the video model. A clip is accepted only when its per-frame silhouettes (median and 10th percentile) and the racket still match the render | `artwork/motion/painted/` |
-| `artwork motion-compose` | workstation | ffmpeg | builds the moveset reel: every clip in an 8-column grid, contacts aligned, looping, painted where accepted, plus an all-render twin | `artwork/motion/rybakina_moveset_reel.mp4`, `rybakina_moveset_reel_render.mp4`, `rybakina_moveset_tiles/`, `motion.json` |
+| `artwork motion-compose` | workstation | ffmpeg | builds the moveset reel: every clip in an 8-column grid, contacts aligned, looping, painted where accepted, plus an all-render twin. `--profile quest3` / `draft` builds one render-only reel on the fixed 2064×2208 canvas | `artwork/motion/rybakina_moveset_reel.mp4`, `rybakina_moveset_reel_render.mp4`, `rybakina_moveset_tiles/`, `motion.json`; `<stem>_moveset_reel_<profile>.mp4`, `<stem>_moveset_tiles_<profile>/`, `motion_<profile>.json` |
 | `site` / `serve` | workstation | three.js (from jsDelivr) in the page | builds a static review site of symlinks into the run folder, served with Range support | `site/` → http://127.0.0.1:8765 |
 | `publish` | GPU host (over ssh) | `cloudflared` quick tunnel | sends the code and the run results up, rebuilds the site on the host, serves it there and prints a public `trycloudflare.com` URL (see [docs/review-site.md](docs/review-site.md#sharing-the-site-r3d-publish)) | the host's `site/` and `logs/` |
 
 `scripts/run_pipeline.sh` runs `ingest shots index select character clips track camera motion curate qa curate2
 retarget qa2 signature artwork site`. The first `curate` fixes labels and contact frames from the motion,
 because `qa`'s timing rules need the refined contact. `curate2` repeats it with the QA gate, and `qa2` scores the
-retargeted character. `artwork` runs `poses`, `remote artwork render`, `paint` and `compose`. Re-run and
+retargeted character. `artwork` runs `poses`, `remote artwork render`, `paint` and `compose`, then
+`remote artwork motion-render`, `motion-paint` and `motion-compose` at the `web` profile. Re-run and
 `--force` semantics are covered in [docs/setup.md](docs/setup.md#running-stages).
 
 ## Documentation
 
 | Document | Covers |
 |---|---|
-| [docs/setup.md](docs/setup.md) | workstation and GPU-host setup, `.env`, private inputs, running and resuming stages, configuration, time and cost, troubleshooting |
-| [docs/architecture.md](docs/architecture.md) | the package layout, the run-folder contract (`config.py` `RunLayout`), the workstation / GPU-host split |
+| [docs/setup.md](docs/setup.md) | workstation and GPU-host setup, `.env`, private inputs, running and resuming stages, running a character variant and `scripts/render_quest3.sh`, configuration and `extends`, time, disk and cost, troubleshooting |
+| [docs/architecture.md](docs/architecture.md) | the package layout, the run-folder contract (`config.py` `RunLayout`, its `root` and `out`), render profiles, the workstation / GPU-host split |
 | [docs/motion-pipeline.md](docs/motion-pipeline.md) | footage to moveset: index, select, track, camera calibration, GVHMR, curate, QA, retarget, signature |
-| [docs/character.md](docs/character.md) | references, stylized hero and turnaround, mesh and rig |
-| [docs/artwork.md](docs/artwork.md) | the character sheet, the moveset atlas, the motion videos and the painted versions |
-| [docs/review-site.md](docs/review-site.md) | the review website: build, serve, pages, data, sharing it with `r3d publish` |
+| [docs/character.md](docs/character.md) | references, stylized hero and turnaround, mesh and rig, the Naomi variant |
+| [docs/artwork.md](docs/artwork.md) | the character sheet, the moveset atlas, the motion videos and the painted versions, the render profiles and the Quest 3 reel |
+| [docs/review-site.md](docs/review-site.md) | the review website: build, serve, pages, data, the variant sections, sharing it with `r3d publish` |
 
 ## Repository layout
 
 ```
 configs/rybakina.yaml        athlete, models, thresholds, quotas, GPU host root and Blender path
+configs/naomi.yaml           the Naomi variant: `extends: rybakina.yaml`, its own character settings
 src/rybakina3d/
   config.py                  typed config + RunLayout / ClipLayout (the on-disk contract between stages)
   cli.py                     `r3d`: one sub-command per stage, `r3d remote <stage>`
@@ -184,23 +199,25 @@ src/rybakina3d/
   selection.py clips.py tracking.py camera.py
   motion/                    recover.py (GVHMR), smpl.py (skeleton, joint indices, FK)
   curate.py qa.py signature.py
-  character/                 refs.py stylize.py mesh.py
+  character/                 refs.py stylize.py mesh.py, art.py (art-team variants), face.py
   assemble.py                retarget driver: Blender job, check sheets, re-import gate
-  artwork/                   layout.py (the sheet) poses.py render.py paint.py compose.py
+  artwork/                   layout.py (the sheet, render profiles) poses.py render.py paint.py compose.py
                              motion_render.py motion_paint.py motion_compose.py
-  blender/                   retarget.py racket.py artwork.py artwork_motion.py (run inside Blender: bpy + numpy)
+  blender/                   retarget.py racket.py artwork.py artwork_motion.py face_project.py
+                             (run inside Blender: bpy + numpy)
   site.py                    review site build + server
   gemini.py fal.py           hosted-model clients
   gltf.py media.py util.py   GLB stats, ffmpeg wrappers, logging / io / secrets
 web/                         static review front-end (copied into site/)
-scripts/                     run_pipeline.sh, sync.sh, setup_gpu.sh
+scripts/                     run_pipeline.sh, sync.sh, setup_gpu.sh, render_quest3.sh
 tests/                       unit tests on synthetic data (no GPU, Blender or network)
 docs/                        the documents above
 ```
 
 Gitignored and therefore missing from a clone: `.env`, `runs/`, the source video (`*.mp4`), the client deck
-(`*.pdf`), `Screenshot*.png`, `/naomi_style.png`, `/assets/`, and the GPU-host folders `bin/`, `weights/` and
-`body_models/`.
+(`*.pdf`), `Screenshot*.png`, `/naomi_style.png`, `/assets/`, the art team's `/artexamplesfortennisnaomiosaka/`,
+and the folders `bin/`, `weights/` (GVHMR and YOLO on the GPU host, YuNet for `character face` on the workstation)
+and `body_models/`.
 
 ## Known limitations
 

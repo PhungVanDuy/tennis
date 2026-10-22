@@ -68,6 +68,7 @@ The dotted edges into `site` stand for "reads everything". The site also reads t
 | `r3d character refs` | workstation | `character/refs.py` | `character/refs/` |
 | `r3d character stylize` | workstation (Gemini image) | `character/stylize.py` | `character/sheet/` |
 | `r3d character mesh` | workstation (fal) | `character/mesh.py` | `character/mesh/`, `character/rigged.glb` |
+| `r3d character face` | workstation (local Blender, YuNet) | `character/face.py`, `blender/face_project.py` | `character/face/`, a new base colour in `character/rigged.glb` (optional, art-team variants) |
 | `r3d remote clips` | GPU host | `clips.py` | `clips/<id>/clip.json`, `clip.mp4`, `preview.mp4` |
 | `r3d remote track` | GPU host | `tracking.py` | `clips/<id>/track.npz`, `track.jpg` |
 | `r3d camera` | workstation | `camera.py` | `clips/<id>/camera.npz`, `camera.jpg` |
@@ -80,9 +81,9 @@ The dotted edges into `site` stand for "reads everything". The site also reads t
 | `r3d remote artwork render` | GPU host (Blender Cycles) | `artwork/render.py`, `blender/artwork.py` | `artwork/renders/` |
 | `r3d artwork paint` | workstation (fal) | `artwork/paint.py` | `artwork/painted/` |
 | `r3d artwork compose` | workstation | `artwork/compose.py` | `artwork/rybakina_*.png`, `artwork/artwork.json` |
-| `r3d remote artwork motion-render` | GPU host (Blender Cycles) | `artwork/motion_render.py`, `blender/artwork_motion.py` | `artwork/motion/render/` |
+| `r3d remote artwork motion-render [--profile P]` | GPU host (Blender Cycles) | `artwork/motion_render.py`, `blender/artwork_motion.py` | `artwork/motion/render/` (web), `artwork/motion/render_<P>/` |
 | `r3d artwork motion-paint` | workstation (fal) | `artwork/motion_paint.py` | `artwork/motion/painted/` |
-| `r3d artwork motion-compose` | workstation | `artwork/motion_compose.py` | `artwork/motion/rybakina_moveset_reel*.mp4`, `rybakina_moveset_tiles/`, `motion.json` |
+| `r3d artwork motion-compose [--profile P]` | workstation | `artwork/motion_compose.py` | `artwork/motion/rybakina_moveset_reel*.mp4`, `rybakina_moveset_tiles/`, `motion.json` (web); `<stem>_moveset_reel_<P>.mp4`, `<stem>_moveset_tiles_<P>/`, `motion_<P>.json` |
 | `r3d site`, `r3d serve` | workstation | `site.py` | `site/` |
 | `r3d publish` | GPU host, started from the workstation | `remote.py` (`publish`) | on the host: `site/`, `logs/` (see [review-site.md](review-site.md#sharing-the-site-r3d-publish)) |
 
@@ -112,10 +113,10 @@ ingest shots index select character clips track camera motion curate qa curate2 
 - `character` runs `character refs`, then `stylize`, then `mesh`.
 - `curate` runs twice. The first pass refines each clip's contact frame from the recovered motion and writes it into `clip.json`, because `qa`'s timing check measures against that contact. `curate2` then runs with the QA gate in place.
 - `qa` also runs twice. `qa2` runs after `retarget` and adds the retargeted character's foot skate and jitter, read from `anim/joints/<id>.npz`.
-- `artwork` runs `artwork poses`, `r3d remote artwork render`, `artwork paint` and `artwork compose`.
+- `artwork` runs `artwork poses`, `r3d remote artwork render`, `artwork paint` and `artwork compose`, then the three "in motion" stages at the `web` profile: `r3d remote artwork motion-render`, `artwork motion-paint` and `artwork motion-compose`.
 - `FROM=<name> scripts/run_pipeline.sh` resumes at any name in the list, including `curate2` and `qa2`.
 
-The three "in motion" stages (`artwork motion-render`, `motion-paint`, `motion-compose`) are **not** in the script. Run them by hand after `artwork`:
+To run only the three "in motion" stages (`artwork motion-render`, `motion-paint`, `motion-compose`), for example after a new moveset:
 
 ```bash
 .venv/bin/r3d remote artwork motion-render
@@ -124,12 +125,16 @@ The three "in motion" stages (`artwork motion-render`, `motion-paint`, `motion-c
 .venv/bin/r3d site
 ```
 
+A character variant's Quest 3 set has its own driver, `scripts/render_quest3.sh`: per batch of clips it runs `r3d remote artwork motion-render --profile quest3 --clip …`, `r3d artwork motion-compose --profile quest3` and `r3d publish`, with `R3D_CONFIG` set to the variant's config ([setup.md](setup.md#a-character-variant)).
+
 ## The run folder contract
 
 `Config.run` is a `RunLayout` over `run_dir`, and `RunLayout.clip(id)` returns a `ClipLayout`. These two classes are the contract between stages: if a path is not a property there, other stages should not depend on it. Two helpers decide which clips a stage sees:
 
 - `RunLayout.clip_ids()` returns the clips of the **current** `selection.json` that have been cut (they have a `clip.json`), in selection order. Folders left over from an older selection are ignored.
 - `RunLayout.kept_clip_ids()` returns the clips `curate` kept, in the same order. Before `curate` has run, it returns every cut clip. This is the moveset that `retarget`, `signature` and the artwork stages work on.
+
+In the table, `character/`, `anim/` and `artwork/` sit under `RunLayout.out`, and `rybakina_` in a file name is `RunLayout.stem` ([Character variants](#character-variants-root-and-out)). For the Rybakina config both are the run root and `rybakina`.
 
 | Path | `RunLayout` / `ClipLayout` | Written by | Made on | Read by |
 |---|---|---|---|---|
@@ -164,8 +169,10 @@ The three "in motion" stages (`artwork motion-render`, `motion-paint`, `motion-c
 | `artwork/renders/` (`renders.json`) | `artwork_renders` | artwork render | host | paint, compose |
 | `artwork/painted/` (`paint.json`) | `artwork_painted` | artwork paint | workstation | compose |
 | `artwork/rybakina_character_sheet.png`, `..._render.png`, `rybakina_moveset_atlas.png`, `artwork.json` | `character_sheet`, `character_sheet_render`, `moveset_atlas`, `artwork_report` | artwork compose | workstation | site |
-| `artwork/motion/frames/` | `motion_frames` | motion-render (PNG frames) | host | motion-render (re-encode only) |
-| `artwork/motion/render/` (`renders.json`) | `motion_renders` | motion-render | host | motion-paint, motion-compose, site |
+| `artwork/motion/frames/` (`frames/<profile>/` for `quest3` and `draft`) | `motion_frames` | motion-render (PNG frames) | host | motion-render (re-encode only) |
+| `artwork/motion/render/` (`renders.json`) | `motion_renders`, `motion_renders_for("web")` | motion-render | host | motion-paint, motion-compose, site |
+| `artwork/motion/render_<profile>/` (`renders.json`) | `motion_renders_for(profile)` | motion-render `--profile quest3` / `draft` | host | motion-compose `--profile`, site (variants) |
+| `artwork/motion/<stem>_moveset_reel_<profile>.mp4`, `<stem>_moveset_tiles_<profile>/`, `motion_<profile>.json` | (by name in `motion_compose.py`: `profile_reel`, `tiles_dir`, `profile_report`) | motion-compose `--profile quest3` / `draft` | workstation | site (variants) |
 | `artwork/motion/painted/` (`paint.json`) | `motion_painted` | motion-paint | workstation | motion-compose, site |
 | `artwork/motion/rybakina_moveset_reel.mp4`, `..._reel_render.mp4`, `rybakina_moveset_tiles/`, `motion.json` | `moveset_reel`, `moveset_reel_render`, `motion_report` | motion-compose | workstation | site |
 | `site/` | `site_dir` | site | workstation | serve |
@@ -173,8 +180,28 @@ The three "in motion" stages (`artwork motion-render`, `motion-paint`, `motion-c
 Notes on the contract:
 
 - `clip.json` starts as the selection row for the clip (stroke, view, shot, hitter box, contact frame, score). `clips` adds frame counts and rates, and `curate` overwrites `contact_index`. `curate` keeps the original in `contact_index_selected`, so a re-run always starts from the contact that `select` chose and the refinement is idempotent.
-- Frames are 1:1 across a clip. `clip.mp4` carries every source frame re-stamped at `clips.model_fps` (30, GVHMR's training rate). `preview.mp4`, `overlay.mp4`, `motion.npz`, the retargeted action and the artwork videos all play at the source rate (25 fps for this footage). Frame *i* is the same instant everywhere.
+- Frames are 1:1 across a clip. `clip.mp4` carries every source frame re-stamped at `clips.model_fps` (30, GVHMR's training rate). `preview.mp4`, `overlay.mp4`, `motion.npz`, the retargeted action and the web artwork videos all play at the source rate (25 fps for this footage). Frame *i* is the same instant everywhere. The `quest3` and `draft` videos are the exception: they play at 60 fps, output frame *k* shows the action at a sub-frame (`blender/artwork_motion.frame_times`), and their `renders.json` rows give the contact as an output frame and every frame's action time (`source.times`).
 - Coordinate frames are documented where they are produced. SMPL quantities in `motion.npz` are Y-up metres. `camera.npz` is in court metres (Z up, origin at the court centre). Blender-side data (`anim/joints`, the renders' camera records) is Z-up.
+
+### Character variants: `root` and `out`
+
+`RunLayout(root, variant=None)` separates what is shared from what belongs to one character. `Config.run` passes `character.variant`.
+
+| Attribute | Rybakina config | Variant config (`character.variant: naomi`) |
+|---|---|---|
+| `root` | `runs/rybakina/` | `runs/rybakina/` (the same `run_dir`) |
+| `out` | `root` | `root/variants/naomi/` |
+| `stem` | `rybakina` | `naomi` |
+
+- **Under `root`, shared:** `source/`, `shots.json`, `index/`, `selection.json`, `clips/`, `curation.json`, `qa_summary.json`, `signature.json` and `site/`. A variant plays the same captured strokes and does not re-run the stages that write them.
+- **Under `out`, per character:** `character/`, `anim/` and `artwork/`, with `<stem>_*` file names (`anim/<stem>_moveset.glb`, `artwork/<stem>_character_sheet.png`, `artwork/motion/<stem>_moveset_reel.mp4`, …).
+- **Reports keep paths relative to `root`,** so a variant's `renders.json` says `variants/naomi/artwork/motion/render_draft/<clip>.mp4`, and the site resolves both characters' paths the same way.
+- `Config.display_name` is `character.name`, else `athlete.name`: the title on a variant's artwork. `configs/naomi.yaml` inherits `athlete` unchanged, so the name in "captured from …", the handedness and the backhand are Rybakina's.
+- The site builds `RunLayout(root, name)` for every folder in `root/variants/` ([review-site.md](review-site.md#character-variants)).
+
+### Render profiles
+
+`motion-render` and `motion-compose` take `--profile` (`artwork/layout.py` `PROFILES`: `web`, `quest3`, `draft`; see [artwork.md](artwork.md#4-render-profiles-the-quest-3-set)). `RunLayout.motion_renders_for(profile)` is the clip-video folder: `artwork/motion/render/` for `web`, `artwork/motion/render_<profile>/` otherwise. The PNG frames go to `artwork/motion/frames/` for `web` and `frames/<profile>/` otherwise (`motion_render.frames_root`). Each profile has its own `renders.json`, `job.json` and `blender.log`, and a run of one profile never reads or deletes another's files. `web` stays the input of `motion-paint` and of the web reel; `quest3` and `draft` are render only.
 
 ## Workstation and GPU host
 
@@ -198,7 +225,7 @@ The host is `remote.host` in the config, or `R3D_HOST` from the environment or `
 | Direction | What travels | What does not (constant in `remote.py`) | Why |
 |---|---|---|---|
 | push (code) | `src/ configs/ scripts/ tests/ web/ pyproject.toml README.md naomi_style.png` | everything else (`.env`, `runs/`, `*.mp4`, `weights/`) | `sync.sh` include list |
-| push (run) | the run folder; inside `clips/`, only `clips/*/camera.npz` (`PUSH_FILTERS`) | `source/proxy.mp4`, `source/audio16k.wav`, `anim/`, `site/`, `*.part.*`, `artwork/painted/`, `artwork/rybakina_*`, `artwork/artwork.json`, `artwork/motion/painted/`, `artwork/motion/rybakina_*`, `artwork/motion/motion.json` (`PUSH_EXCLUDES`) | the host needs the selection, labels, character, poses and calibrations, not the repaints or sheets |
+| push (run) | the run folder; inside `clips/`, only `clips/*/camera.npz` (`PUSH_FILTERS`) | `source/proxy.mp4`, `source/audio16k.wav`, `anim/`, `site/`, `*.part.*`, `artwork/painted/`, `artwork/*_character_sheet*`, `artwork/*_moveset_*`, `artwork/artwork.json`, `artwork/motion/painted/`, `artwork/motion/*_moveset_*`, `artwork/motion/motion.json`, `artwork/motion/motion_*.json`, `artwork/motion/render*/` (`PUSH_EXCLUDES`) | the host needs the selection, labels, character, poses and calibrations, not the repaints or sheets; the clip videos and their `renders.json` are the host's own, so an older workstation copy never marks finished clips stale |
 | pull (run) | everything else | `clips/*/clip.mp4`, `clips/*/gvhmr/`, `clips/*/camera.npz`, `clips/*/camera.jpg`, `source/`, `*.part.*`, `anim/*.blend`, `anim/*.blend1`, `artwork/motion/frames/`, plus every workstation-made artwork path (`PULL_EXCLUDES`, `WORKSTATION_ARTWORK`) | heavy intermediates stay on the host; a pull must never put an older host copy over a calibration or a workstation-made artwork file |
 
 Consequences worth knowing:
@@ -207,12 +234,13 @@ Consequences worth knowing:
 - **`clip.json` and `qa.json` belong to the host.** Inside `clips/`, the push only carries `camera.npz`. If you ran `curate` (which rewrites `clip.json`) or `qa` on the workstation, the change would never reach the host and the next pull would overwrite it. Run them through `r3d remote`, as the pipeline script does. Both are pure numpy, so the GPU is not the reason.
 - **Deletions do not propagate.** Neither rsync of the run folder uses `--delete`. A file removed on one side, for example a figure that `artwork render` dropped because it is no longer on the sheet, stays on the other side until you remove it there.
 - **Outputs come back only after success.** If the remote command fails, `run_stage` raises before the pull. The partial outputs stay on the host and come back with the next successful `r3d remote` call.
-- **`--config` on `r3d remote` is local only.** It decides which run folder is pushed and pulled. The host loads its own default config unless `R3D_CONFIG` is set in the workstation's environment, in which case its project-relative path is forwarded. To run another config on both sides, use `R3D_CONFIG=configs/other.yaml .venv/bin/r3d remote motion`. `run_dir` must sit inside the project folder for this to work.
+- **`--config` on `r3d remote` is local only.** It decides which run folder is pushed and pulled. The host loads its own default config unless `R3D_CONFIG` is set in the workstation's environment, in which case its project-relative path is forwarded. To run another config on both sides, use `R3D_CONFIG=configs/other.yaml .venv/bin/r3d remote motion`. `run_dir` must sit inside the project folder for this to work. A character variant is run this way (`R3D_CONFIG=configs/naomi.yaml`).
+- **Variants travel by the same rules.** None of the exclude patterns starts with `/`, so rsync matches them at any depth, and `variants/<name>/anim/`, `variants/<name>/artwork/motion/frames/` and a variant's workstation-made artwork are treated like the Rybakina ones. The artwork patterns match by suffix (`*_character_sheet*`, `*_moveset_*`), so they hold for any `stem`.
 - **The style reference goes to the host.** `naomi_style.png` is in `sync.sh`'s include list because `artwork motion-render` composites every frame over the reference sheet's paper colour (`paint.paper_colour()`), on the host. The file is gitignored, so it travels only when it exists on the workstation.
 
 ## Caching, fingerprints and `--force`
 
-No stage reads a global "done" flag. Each stage decides for itself, as shown below. `--clip <id>` (repeatable) limits `clips`, `track`, `camera` and `motion` to those clips. For `retarget` it limits only the check renders, because the moveset GLB always holds every kept clip.
+No stage reads a global "done" flag. Each stage decides for itself, as shown below. `--clip <id>` (repeatable) limits `clips`, `track`, `camera`, `motion` and `artwork motion-render` to those clips. For `retarget` it limits only the check renders, because the moveset GLB always holds every kept clip.
 
 | Stage | Skips when | `--force` | Notes |
 |---|---|---|---|
@@ -231,7 +259,7 @@ No stage reads a global "done" flag. Each stage decides for itself, as shown bel
 | character mesh | a generator whose report already has a rigged GLB | regenerates both generators | `rigged.glb` is replaced only when the primary's bytes differ |
 | artwork render | per figure: spec key unchanged and both PNGs exist | re-renders all | the key is clip, frame, azimuth, elevation, framing, height, racket, `RENDER_VERSION`, `SAMPLES` and the GLB's size and mtime; figures no longer on the sheet are deleted |
 | artwork paint | per slot: `fingerprint` unchanged, no error, cut-out exists | repaints all | the fingerprint is the render and matte bytes, `models.image_paint` and the slot's own prompt text; a `CUT_VERSION` bump re-cuts accepted repaints without calling the model; `compose` refuses a repaint whose fingerprint no longer matches the current render |
-| artwork motion-render | per video: `fingerprint` unchanged and video, matte and poster exist | re-renders all | the fingerprint is the GLB's SHA-1, `MOTION_VERSION`, `layout.MOTION` camera, size, samples, fps, paper colour, encoding, and the clip with its contact and frame count; frames already rendered under the same fingerprint are only re-encoded |
+| artwork motion-render | per video of the profile: `fingerprint` unchanged and its files exist (video and poster, plus the matte for web) | re-renders all of that profile | the fingerprint is the GLB's SHA-1, `MOTION_VERSION`, `layout.MOTION` camera, size, samples, fps, paper colour, encoding, and the clip with its contact and frame count. Web's is the formula from before profiles; `quest3` and `draft` add the whole profile (minus `keep_frames`), the clips' rate and `PROFILE_VERSION`. Frames already rendered under the same render key (the fingerprint without paper and encoding, recorded in `blender.json`) are only re-encoded; `quest3` deletes its frames once encoded, so a change there renders again |
 | artwork motion-paint | per clip: `fingerprint` unchanged, no error, accepted video exists | repaints all | the fingerprint is the anchor key (render and matte bytes, `models.image_paint`, prompt, `FIRST_VERSION`), the video model and request, the matting model and `BACKGROUND`; cached records are re-judged against the current thresholds without a call; a failed call is retried on the next run |
 
 There is **no cross-stage dependency tracking**. A stage checks its own outputs, and the artwork stages also fingerprint their direct inputs. If you recompute something upstream (say `r3d remote motion --clip X --force`), re-run the stages after it yourself, or use `FROM=curate scripts/run_pipeline.sh`. The fingerprinted artwork stages notice a changed GLB or render on their own.
@@ -246,7 +274,9 @@ Partial files cannot pass for finished ones. `util.write_json` writes to a `.tmp
 2. the `R3D_CONFIG` environment variable,
 3. `configs/rybakina.yaml`.
 
-`run_dir` and `source.video` may be relative. They resolve against `PROJECT_ROOT`, the root of the checkout (`Path(__file__).resolve().parents[2]` in `config.py`), not against the working directory. The same root locates `.env`, `web/`, `bin/`, `weights/` and `naomi_style.png`, so the package is meant to run from a checkout with an editable install (`uv pip install -e ".[api,dev]"`).
+A file may start with `extends: <other.yaml>`, a path relative to that file. `_read_yaml` loads the base first (recursively) and deep-merges the file over it: mappings merge key by key, and any other value replaces the base's. `configs/naomi.yaml` extends `rybakina.yaml` and changes only `character`, `models.mesh`, `models.mesh_alt` and `retarget` ([setup.md](setup.md#other-configs-extends-and-character-variants)).
+
+`run_dir`, `source.video` and `character.refs_dir` may be relative. They resolve against `PROJECT_ROOT`, the root of the checkout (`Path(__file__).resolve().parents[2]` in `config.py`), not against the working directory. The same root locates `.env`, `web/`, `bin/`, `weights/` and `naomi_style.png`, so the package is meant to run from a checkout with an editable install (`uv pip install -e ".[api,dev]"`).
 
 The YAML maps one-to-one onto Pydantic models. `run_dir`, `athlete`, `source`, `remote`, `models` and `select` are required. The other sections have defaults in code. Where code and the committed YAML differ, the YAML wins when loaded:
 
@@ -258,12 +288,12 @@ The YAML maps one-to-one onto Pydantic models. `run_dir`, `athlete`, `source`, `
 | `models` | every hosted-model stage | `image_paint` and `video_paint` have code defaults |
 | `shots`, `index`, `select` | footage stages | |
 | `clips`, `track`, `motion` | GPU stages | |
-| `character` | mesh (height, triangle budget, views) | |
+| `character` | mesh (height, triangle budget, views, `geometry_resolution`, `mesh_primary`); `variant` (`RunLayout.out` / `stem`); `name` (`Config.display_name`); `refs_dir` (refs and stylize take the art-team path, `character/art.py`, and mesh sends the art front as Meshy's texture guide); `racket_colors` (retarget → `blender/racket.py`) | the variant keys default to `None`; `configs/rybakina.yaml` sets none of them |
 | `curate` | curate | `keep_all: false` in code vs `true` in the YAML (every clip animated, failures only flagged) |
 | `retarget` | retarget | |
 | `site` | serve (`port: 8765`) | |
 
-Most thresholds are module constants, not config, and are named in the module that applies them: `ACCEPT_IOU = 0.85` in `artwork/paint.py`, `OVERHEAD_MIN_RISE_M = 0.25` and `SWING_MIN_SPEED_MS = 4.0` in `curate.py`, `MIN_OK_FRACTION = 0.90` and `MAX_CLIP_REPROJ_PX = 1.5` in `camera.py`, and the QA bands in `qa.py`. When a change to code alters what a cached artwork output looks like, bump that stage's version constant (`RENDER_VERSION`, `MOTION_VERSION`, `CUT_VERSION`, `FIRST_VERSION`) so the caches invalidate.
+Most thresholds are module constants, not config, and are named in the module that applies them: `ACCEPT_IOU = 0.85` in `artwork/paint.py`, `OVERHEAD_MIN_RISE_M = 0.25` and `SWING_MIN_SPEED_MS = 4.0` in `curate.py`, `MIN_OK_FRACTION = 0.90` and `MAX_CLIP_REPROJ_PX = 1.5` in `camera.py`, and the QA bands in `qa.py`. When a change to code alters what a cached artwork output looks like, bump that stage's version constant (`RENDER_VERSION`, `MOTION_VERSION`, `CUT_VERSION`, `FIRST_VERSION`) so the caches invalidate. `PROFILE_VERSION` in `motion_render.py` invalidates only the `quest3` and `draft` videos (sub-frame timing, scaled pixel constants).
 
 `Config.run` is a `cached_property`. Code that changes `cfg.run_dir` after `cfg.run` has been read must drop the cached layout first (`cfg.__dict__.pop("run", None)`). The tests do this.
 
@@ -288,13 +318,14 @@ Two thin modules wrap the hosted APIs. Stages pick model ids from `models:` in t
 
 ## Blender scripts
 
-Three drivers run Blender headless with a JSON job:
+Four drivers run Blender headless with a JSON job (`character face` on the workstation's Blender, the others on the GPU host):
 
 | Driver | Script | Job and report |
 |---|---|---|
 | `assemble.py` (`r3d retarget`) | `blender/retarget.py` (+ `racket.py`) | `anim/job.json` → `anim/retarget.json`; a second run with `--verify` → `anim/verify.json` |
 | `artwork/render.py` | `blender/artwork.py` | `artwork/renders/job.json` → `artwork/renders/blender.json` |
-| `artwork/motion_render.py` | `blender/artwork_motion.py` (+ `artwork.py`) | `artwork/motion/frames/job.json` → `frames/<name>/blender.json` per video |
+| `artwork/motion_render.py` | `blender/artwork_motion.py` (+ `artwork.py`) | `artwork/motion/frames/job.json` → `frames/<name>/blender.json` per video (web); `frames/<profile>/job.json` → `frames/<profile>/<name>/blender.json` for `quest3` and `draft` |
+| `character/face.py` (`r3d character face`) | `blender/face_project.py` | `character/face/job_render.json` → `render.png`, `camera.json`; then `job_bake.json` → `basecolor.png` |
 
 The rules:
 
@@ -316,7 +347,7 @@ The current run's reports record Blender 5.2.2 LTS, with Cycles on an NVIDIA A10
 ## Tests
 
 ```bash
-.venv/bin/pytest -q                      # 132 tests, about 20 s
+.venv/bin/pytest -q                      # 164 tests, about 25 s
 .venv/bin/ruff check src tests
 ```
 
@@ -342,9 +373,11 @@ Tests that need ffmpeg (`test_artwork_motion_render.py`, `test_artwork_motion_co
 | `test_retarget_driver.py` | `motion.npz` validation, check-frame choice, the re-import gate |
 | `test_artwork_poses.py` | trophy, contact and start moments, slot choice, hero choice, facing and camera conventions, framing, shadow clean-up |
 | `test_artwork_compose.py` | aligned IoU, mask clean-up, feet-line placement, request size, paper colour, sheet and atlas layout, grip prompts |
-| `test_artwork_motion_render.py` | single-camera framing, floor track, turntable, shadow region, compositing, fingerprints, encoding, skip / re-encode / force |
+| `test_artwork_motion_render.py` | single-camera framing, floor track, turntable, shadow region, compositing, fingerprints, encoding, skip / re-encode / force; render profiles: web's unchanged fingerprint and encoder command, render keys, separate folders and frames, 60 fps frame times, portrait framing, scaled pixel constants, `quest3` encoding (High @ 5.2, no matte), `keep_frames`, which meshes count as the figure |
 | `test_artwork_motion_paint.py` | masks, IoU statistics, the 4k+1 plan, the frame map, video round-trip, plate and placement, flicker and drift, the judge, racket recall, fingerprints, the model guard |
-| `test_artwork_motion_compose.py` | reel timing (every contact on one frame, seamless loop), layout, paper estimate, the site's motion block |
+| `test_artwork_motion_compose.py` | reel timing (every contact on one frame, seamless loop), layout, paper estimate, the site's motion block; the fixed 2064 × 2208 canvas (fits without cropping, labels inside), contain-fit tiles, the variant caption, the `quest3` reel and its report, composing while the render runs |
+| `test_character_art.py` | the art-team path: request sizes, square views on one feet line, alpha cut-out; `character face`: the face oval, skin evening, detail transfer; `gltf.replace_image` |
+| `test_site_variants.py` | the site's variant sections: no `variants/` folder, links to what exists, draft live until `quest3` is composed, atlas order after a partial compose, renders only and moveset only, `variants` in `site.json` |
 
 ## Adding a stage
 
@@ -366,6 +399,7 @@ Tests that need ffmpeg (`test_artwork_motion_render.py`, `test_artwork_motion_co
 - **Two copies of the run folder.** Sync is file-level rsync with no deletion, and push and pull rules differ by path. `r3d publish` adds a third rule: it pushes almost the whole run folder with `--update`. Running a stage directly on the host, outside `r3d remote`, or running a host-owned stage on the workstation, can make the two copies disagree.
 - **Manual host setup.** The source video and the Blender install are set up on the host by hand. Neither `setup_gpu.sh` nor `r3d remote` provides them.
 - **Checkout-relative paths.** `PROJECT_ROOT` comes from the source location, so a non-editable install would look for configs, `.env` and `web/` in the wrong place.
-- **The motion artwork stages are outside `run_pipeline.sh`.** They must be run by hand (see [Run order](#run-order)).
+- **A variant's config also reaches the shared files.** Nothing stops a shared stage from running with a variant's config. `qa` would then write the run root's `clips/<id>/qa.json` and `qa_summary.json` from the variant's joint tracks. Run only the character, retarget and artwork stages with it ([setup.md](setup.md#a-character-variant)).
+- **Render profiles are outside `run_pipeline.sh`.** It runs the motion artwork stages at `web` only. `quest3` and `draft` are run by hand or with `scripts/render_quest3.sh` (see [Run order](#run-order)).
 - **Fonts for `artwork compose`.** It looks for macOS system fonts, then DejaVu (`/usr/share/fonts/truetype/dejavu`), then PIL's default font. The typography of the sheet depends on which of these is present.
 - **The style reference is required.** The reference sheet is a client file outside the repository, but `artwork paint`, `compose`, `motion-render`, `motion-paint`, `motion-compose` and 5 tests all read it.

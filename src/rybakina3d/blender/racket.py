@@ -24,6 +24,7 @@ THROAT_ANGLE = math.radians(42)           # the arms meet the head this far roun
 SEGMENTS = 36
 MAINS, CROSSES = 16, 19
 RED, BLACK = (0.62, 0.02, 0.03, 1.0), (0.02, 0.02, 0.025, 1.0)
+STRING_WHITE = (0.96, 0.96, 0.92)          # linear RGB, like every colour here
 FRAME, GRIP_MAT, STRINGS = 0, 1, 2
 
 
@@ -107,7 +108,7 @@ def _geometry() -> tuple[_Builder, list[int]]:
     return g, string_faces
 
 
-def _strings_image(size: int = 256):
+def _strings_image(size: int = 256, color=STRING_WHITE):
     u = (np.arange(size) + 0.5) / size
     line = 2.2 / size
     mains = ((u * MAINS) % 1.0) < line * MAINS
@@ -115,7 +116,7 @@ def _strings_image(size: int = 256):
     on = mains[None, :] | crosses[:, None]
     px = np.empty((size, size, 4), np.float32)
     px[...] = (1.0, 1.0, 1.0, 0.10)
-    px[on] = (0.96, 0.96, 0.92, 0.9)
+    px[on] = (*color[:3], 0.9)
     img = bpy.data.images.new("RacketStrings", size, size, alpha=True)
     img.pixels.foreach_set(px.ravel())
     img.pack()
@@ -138,14 +139,17 @@ def _material(name: str, color, roughness: float, image=None):
     return mat
 
 
-def build(name: str = "Racket", collection=None):
-    """Create the racket object (one mesh, three materials) in its local frame; returns the object."""
+def build(name: str = "Racket", collection=None, colors: dict | None = None):
+    """Create the racket object (one mesh, three materials) in its local frame; returns the object.
+    `colors` (linear RGB) may override "frame", "grip" and "strings"."""
+    c = colors or {}
+    frame, grip = (*c.get("frame", RED)[:3], 1.0), (*c.get("grip", BLACK)[:3], 1.0)
     g, string_faces = _geometry()
     me = bpy.data.meshes.new(name)
     me.from_pydata(g.verts, [], g.faces)
     me.polygons.foreach_set("material_index", g.mats)
-    for mat in (_material("Racket_Frame", RED, 0.35), _material("Racket_Grip", BLACK, 0.7),
-                _material("Racket_Strings", (1, 1, 1, 1), 0.6, _strings_image())):
+    for mat in (_material("Racket_Frame", frame, 0.35), _material("Racket_Grip", grip, 0.7),
+                _material("Racket_Strings", (1, 1, 1, 1), 0.6, _strings_image(color=c.get("strings", STRING_WHITE)))):
         me.materials.append(mat)
 
     uv = me.uv_layers.new(name="UVMap")
