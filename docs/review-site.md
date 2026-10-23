@@ -218,7 +218,7 @@ What the section shows:
 
 - The clips come from the live profile's reel report merged with its `renders.json`. A clip rendered after the last compose appears in its place in the atlas order, with its poster.
 - Before the first compose of the live profile, the grid shows every rendered clip's poster and a note gives the `motion-compose` command.
-- A composed clip without a tile yet shows its poster ("poster · tile pending"). A clip not rendered yet shows "render pending".
+- A composed clip without a tile yet shows its poster ("poster · tile pending"). A clip not rendered yet shows "render pending", and links no tile even if one is left in the tiles folder (a tile copies its clip's render).
 - With the draft live and `quest3` renders already back, a note says how many Quest 3 clips are rendered and which command makes their reel.
 - The commands shown carry `R3D_CONFIG=<the variant's config>`, found by scanning `configs/*.yaml` for one with that `character.variant` (`site._variant_config`).
 
@@ -228,8 +228,9 @@ What the section shows:
 |---|---|---|
 | `reel_stale` | the reel is older than any linked clip render, or it holds fewer clips than are rendered (`n_in_reel` against `n_rendered`) | a note "The reel predates the latest renders (it holds N of the M rendered clips)" with the `motion-compose` command |
 | `tile_stale` (per clip), `n_tiles_stale` | a tile copy is older than its clip's render | the tile still plays; a note says how many tiles predate a re-render and that the full-resolution link is current |
+| `outdated` (per clip), `n_outdated` | the clip's video is older than the variant's moveset GLB, so it shows an earlier build of the moveset (its rig, its hands) | nothing of it is linked, neither the video, its poster nor its tile, and it does not count as rendered; the tile reads "re-render pending", and while the Quest 3 reel holds fewer than all clips the note adds how many "from the previous rig are being re-rendered". `motion-compose` leaves the same clips out of the reel ([artwork.md](artwork.md#motion-compose)) |
 
-The data is `variants[]` in `site.json`: per variant `variant`, `name`, `motion_from`, `config`, `profile` (live), `composed`, `size`, `fps`, `reel` (`url`, `poster`, `size_mb`, `size`, `frames`, `fps`, `loop_s`), `reel_stale`, `groups`, `clips` (`id`, `stroke`, `profile`, `flagged`, `mp4`, `mb`, `poster`, `tile`, `tile_poster`, `tile_stale`, `size`, `fps`, `frames`, `contact_frame`), the counts `n_clips`, `n_rendered`, `n_hires`, `n_tiles`, `n_tiles_stale`, `n_flagged`, `n_in_reel`, `progress` (per profile: `rendered`, `composed`, `size`), `downloads`, `made` and `updated`. `r3d site` logs each variant's progress, for example `Naomi Osaka: 39/39 clips (draft)`.
+The data is `variants[]` in `site.json`: per variant `variant`, `name`, `motion_from`, `config`, `profile` (live), `composed`, `size`, `fps`, `reel` (`url`, `poster`, `size_mb`, `size`, `frames`, `fps`, `loop_s`), `reel_stale`, `groups`, `clips` (`id`, `stroke`, `profile`, `outdated`, `flagged`, `mp4`, `mb`, `poster`, `tile`, `tile_poster`, `tile_stale`, `size`, `fps`, `frames`, `contact_frame`), the counts `n_clips`, `n_rendered`, `n_hires`, `n_tiles`, `n_tiles_stale`, `n_outdated`, `n_flagged`, `n_in_reel`, `progress` (per profile: `rendered`, `composed`, `size`), `downloads`, `made` and `updated`. `r3d site` logs each variant's progress, for example `Naomi Osaka: 39/39 clips (draft)`.
 
 ### Footage
 

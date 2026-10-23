@@ -9,6 +9,10 @@ and over the last half second every figure fades from its finish into the paper 
 (never two ghosted poses at once), so the reel loops without a cut. A thin timeline in the title marks the
 contact instant. Real time (the clips' 25 fps), H.264 yuv420p with faststart, 1920 px wide.
 
+A render video older than the moveset GLB (run.moveset_glb) shows an earlier build of the moveset: its clip counts
+as not rendered (left out of the reel and counted as missing, its site copy removed, no mp4 in the report) until
+motion-render makes it again, the rule the review site applies to a variant's renders (site._variant).
+
 The paper and its captions are drawn once with PIL; each tile video is decoded once at tile size (ffmpeg → numpy)
 and laid on the paper multiplicatively against its own background colour, frame by frame, so that its paper
 becomes the reel's paper (no tile edges, and a painted tile's drifting paper tone is evened out) while its
@@ -103,6 +107,19 @@ class ClipMotion:
     painted: Path | None = None        # the accepted painted video, else None
     paint: dict | None = None          # motion_painted/<clip>.json, summarised (also when not accepted)
     row: dict = field(default_factory=dict)
+    outdated: bool = False             # its render video is older than the moveset GLB: render, poster, matte None
+
+
+def outdated(video: Path, moveset: Path) -> bool:
+    """A render video older than the moveset GLB shows an earlier build of the moveset (its rig, its hands): it
+    counts as no render until it is made again from the current one (mtime, as site._variant does)."""
+    return video.exists() and moveset.exists() and video.stat().st_mtime < moveset.stat().st_mtime
+
+
+def missing_note(missing: list[str], old: list[str]) -> str:
+    """The count of clips left out of a reel for the summary log line, saying how many of them were left out only
+    because their render predates the moveset."""
+    return f"{len(missing)} missing" + (f", {len(old)} of them outdated: older than the moveset" if old else "")
 
 
 def _num(*vals) -> float | None:
@@ -134,10 +151,12 @@ def paint_summary(entry: dict) -> dict:
 def motion_clips(cfg: Config, rdir: Path | None = None, painted: bool = True,
                  fps: float | None = None) -> list[tuple[str, list[ClipMotion]]]:
     """Every moveset clip with its motion videos, [(stroke, clips)] in the atlas's order (strokes in
-    ATLAS.stroke_order, clips in curation order); a clip without a render yet has render None. `rdir` is a render
-    profile's folder (default the web renders); painted=False never looks at motion-paint (render-only reels);
-    `fps` is that profile's frame rate, for videos renders.json does not list yet (motion-render writes it when
-    its run ends): without it a 60 fps video would be taken at the clip's own 25 fps, and so would its contact."""
+    ATLAS.stroke_order, clips in curation order); a clip without a render yet has render None, and so does one whose
+    render video is older than run.moveset_glb (`outdated`; its poster and matte are None too, its painted video
+    stays as motion-paint left it). `rdir` is a render profile's folder (default the web renders); painted=False
+    never looks at motion-paint (render-only reels); `fps` is that profile's frame rate, for videos renders.json does
+    not list yet (motion-render writes it when its run ends): without it a 60 fps video would be taken at the clip's
+    own 25 fps, and so would its contact."""
     run = cfg.run
     rdir, pdir, profile_fps = rdir or run.motion_renders, run.motion_painted, fps
     renders = read_json(rdir / "renders.json") if (rdir / "renders.json").exists() else {}
@@ -163,10 +182,12 @@ def motion_clips(cfg: Config, rdir: Path | None = None, painted: bool = True,
                 rate = _num(meta.get("src_fps"), meta.get("play_fps"))
                 if contact is not None and fps and rate and fps != rate:
                     contact = round(contact * fps / rate)
-            m = ClipMotion(cid, stroke, c["flagged"], video if video.exists() else None,
-                           poster if poster.exists() else None, matte if matte.exists() else None,
+            old = outdated(video, run.moveset_glb)
+            m = ClipMotion(cid, stroke, c["flagged"], video if video.exists() and not old else None,
+                           poster if poster.exists() and not old else None,
+                           matte if matte.exists() and not old else None,
                            int(n) if (n := _num(row.get("n_frames"), row.get("frames"))) else None,
-                           int(contact) if contact is not None else None, fps, row=row)
+                           int(contact) if contact is not None else None, fps, row=row, outdated=old)
             pj = pdir / f"{cid}.json"
             if painted and pj.exists():
                 entry = read_json(pj)
@@ -675,8 +696,12 @@ def _run_web(cfg: Config) -> dict:
     if not have:
         raise RuntimeError(f"no clip renders in {run_.motion_renders}: run `r3d remote artwork motion-render` first")
     missing = [c.id for c in clips if not c.render]
+    old = [c.id for c in clips if c.outdated]
     if missing:
         log(f"[yellow]{len(missing)} clips without a motion render, left out of the reel: {', '.join(missing)}[/]")
+    if old:
+        log(f"[yellow]{len(old)} of them have a render older than {run_.moveset_glb.name} (an earlier build of the "
+            f"moveset), left out until it is rendered again: {', '.join(old)}[/]")
     groups = [(s, [c for c in cs if c.render]) for s, cs in groups]
     groups = [(s, cs) for s, cs in groups if cs]
     layout = reel_layout([len(cs) for _, cs in groups])
@@ -772,7 +797,7 @@ def _run_web(cfg: Config) -> dict:
     report["missing"] = missing
     write_json(run_.motion_report, report)
     log(f"reel: {len(have)} clips ({n_painted} painted, {len(have) - n_painted} render"
-        + (f", {len(missing)} missing" if missing else "") + f"), {timing.frames} frames = "
+        + (f", {missing_note(missing, old)}" if missing else "") + f"), {timing.frames} frames = "
         f"{timing.frames / fps:.2f} s, contact at {timing.contact / fps:.2f} s, {layout.size[0]}x{layout.size[1]}, "
         f"{report['reel']['mb']} + {report['reel_render']['mb']} MB → {run_.motion_dir}")
     return report
@@ -794,8 +819,12 @@ def _run_profile(cfg: Config, profile: str) -> dict:
         raise RuntimeError(f"no clip renders in {rdir}: run `r3d remote artwork motion-render --profile {profile}` "
                            "first")
     missing = [c.id for c in clips if not c.render]
+    old = [c.id for c in clips if c.outdated]
     if missing:
         log(f"[yellow]{len(missing)} clips without a {profile} render, left out of the reel: {', '.join(missing)}[/]")
+    if old:
+        log(f"[yellow]{len(old)} of them have a {profile} render older than {run_.moveset_glb.name} (an earlier build "
+            f"of the moveset), left out until it is rendered again: {', '.join(old)}[/]")
     groups = [(s, cs) for s, cs in ((s, [c for c in cs if c.render]) for s, cs in groups) if cs]
     layout = reel_layout([len(cs) for _, cs in groups], width=REEL_EYE[0], height=REEL_EYE[1])
     T = layout.tile
@@ -849,7 +878,7 @@ def _run_profile(cfg: Config, profile: str) -> dict:
         "made": datetime.now().isoformat(timespec="seconds"),
     }
     write_json(profile_report(cfg, profile), report)
-    log(f"reel {profile}: {len(have)} clips" + (f" ({len(missing)} missing)" if missing else "")
+    log(f"reel {profile}: {len(have)} clips" + (f" ({missing_note(missing, old)})" if missing else "")
         + f", {timing.frames} frames = {timing.frames / fps:.2f} s at {fps:g} fps, contact at "
         f"{timing.contact / fps:.2f} s, {W}x{H}, tiles {T} px, {report['reel']['mb']} MB → {out}")
     return report

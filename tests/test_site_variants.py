@@ -157,6 +157,26 @@ def test_renders_of_an_earlier_moveset_wait_for_their_re_render(run_cfg, tmp_pat
     assert (n["n_rendered"], n["n_outdated"]) == (1, 2)
 
 
+def test_a_clip_without_a_current_render_links_no_tile(run_cfg, tmp_path):
+    """A tile copies its clip's render: with the render gone (moved out of the folder, or not made yet) the tile left
+    in the tiles folder shows an earlier one, whether the report lists it or it is only found by name."""
+    v = _quest3(run_cfg)
+    rdir, tdir = v.motion_renders_for("quest3"), v.motion_dir / "naomi_moveset_tiles_quest3"
+    for cid in ("serve_00m01s", "serve_00m02s"):
+        (rdir / f"{cid}.mp4").unlink()
+        (rdir / f"{cid}.jpg").unlink()
+    for name in ("serve_00m02s.mp4", "serve_00m02s.jpg", "backhand_00m04s.mp4", "backhand_00m04s.jpg"):
+        _write(tdir / name)                          # not in the report: the site would take them by name
+    [n] = site._variants(run_cfg, site._Linker(tmp_path / "site"))
+    by = {c["id"]: c for c in n["clips"]}
+    for cid in ("serve_00m01s", "serve_00m02s", "backhand_00m04s"):
+        c = by[cid]
+        assert (c["mp4"], c["poster"], c["tile"], c["tile_poster"], c["outdated"]) == (None, None, None, None, False)
+    fh = by["forehand_00m03s"]                       # its render is there: its tile still plays
+    assert fh["mp4"] and fh["tile"].endswith("naomi_moveset_tiles_quest3/forehand_00m03s.mp4") and fh["tile_poster"]
+    assert (n["n_rendered"], n["n_tiles"], n["n_outdated"]) == (1, 1, 0)
+
+
 def test_draft_is_live_until_quest3_is_composed(run_cfg, tmp_path):
     v = RunLayout(run_cfg.run.root, "naomi")
     ddir = v.motion_renders_for("draft")

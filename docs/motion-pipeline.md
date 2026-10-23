@@ -590,7 +590,8 @@ character from the same camera | overlay at OVERLAY_ALPHA = 0.6 | side view]`, `
   not articulated, and on two-handed backhands the left hand is not constrained to the handle. Naomi's
   moveset (`configs/naomi.yaml`) adds 30 finger bones and puts the left hand on the handle by IK
   ([character.md](character.md#4-the-racket)). Every clip
-  starts at the origin facing the same way; court position and the transitions between strokes are not
+  starts at the origin with the broadcast camera looking along -Y, so her heading at the first frame is the
+  clip's own (it spans 127° over the 39 clips); court position and the transitions between strokes are not
   part of the moveset.
 
 ### 12. `signature`: what makes the strokes hers

@@ -229,6 +229,57 @@ def test_site_motion_block_is_none_without_motion(tmp_path):
     assert site._artwork(cfg, site._Linker(tmp_path / "site")) is None
 
 
+# --- renders of an earlier build of the moveset ---------------------------------------------------------
+def _moveset_built(run, rdir, old: tuple[str, ...]) -> None:
+    """The moveset GLB built again after the `old` clips' renders (video, matte, poster) and before the others."""
+    t = min(p.stat().st_mtime for p in rdir.glob("*.mp4")) - 50
+    run.moveset_glb.parent.mkdir(parents=True, exist_ok=True)
+    run.moveset_glb.write_bytes(b"glTF")
+    os.utime(run.moveset_glb, (t, t))
+    for p in (rdir / f"{cid}{s}" for cid in old for s in (".mp4", "_matte.mp4", ".jpg")):
+        if p.exists():
+            os.utime(p, (t - 50, t - 50))
+
+
+def test_a_render_older_than_the_moveset_is_outdated(tmp_path):
+    video, glb = tmp_path / "clip.mp4", tmp_path / "moveset.glb"
+    video.write_bytes(b"x")
+    assert not mc.outdated(video, glb)                       # no moveset GLB: every render counts
+    glb.write_bytes(b"x")
+    t = video.stat().st_mtime
+    os.utime(glb, (t, t))
+    assert not mc.outdated(video, glb)                       # the same instant counts as made from it (site._fresh)
+    os.utime(glb, (t + 1, t + 1))
+    assert mc.outdated(video, glb)
+    assert not mc.outdated(tmp_path / "none.mp4", glb)       # no video: missing, not outdated
+    assert mc.missing_note(["a", "b"], []) == "2 missing"
+    assert mc.missing_note(["a", "b"], ["b"]) == "2 missing, 1 of them outdated: older than the moveset"
+
+
+def test_motion_clips_leave_out_renders_older_than_the_moveset(motion_run):
+    cfg = motion_run
+    run, rdir = cfg.run, cfg.run.motion_renders
+    for cid in ("serve_00m01s", "serve_00m02s"):
+        shutil.copyfile(rdir / f"{cid}.mp4", rdir / f"{cid}_matte.mp4")
+
+    def clips() -> dict[str, mc.ClipMotion]:
+        return {c.id: c for _, cs in mc.motion_clips(cfg) for c in cs}
+
+    before = clips()                                         # no moveset GLB in the run: every render counts
+    assert [cid for cid, c in before.items() if c.render] == ["serve_00m01s", "serve_00m02s", "forehand_00m03s"]
+    assert not any(c.outdated for c in before.values())
+    # the moveset is built again; serve_00m01s was rendered from the previous build, the others since
+    _moveset_built(run, rdir, old=("serve_00m01s",))
+    after = clips()
+    s1, s2 = after["serve_00m01s"], after["serve_00m02s"]
+    assert s1.outdated and (s1.render, s1.poster, s1.matte) == (None, None, None)
+    assert s1.painted == run.motion_painted / "serve_00m01s.mp4" and s1.paint["accepted"]    # the painted video stays
+    assert not s2.outdated and s2.render == rdir / "serve_00m02s.mp4" and s2.matte == rdir / "serve_00m02s_matte.mp4"
+    assert s2.poster == rdir / "serve_00m02s.jpg" and after["forehand_00m03s"].render
+    bh = after["backhand_00m04s"]                            # never rendered: missing, not outdated
+    assert bh.render is None and not bh.outdated
+
+
 # --- the Quest 3 reel (non-web render profiles) ---------------------------------------------------------
 MOVESET = [12, 12, 12, 1, 2]       # this run's groups: serve, forehand, backhand, slice, overhead
 
@@ -477,3 +528,30 @@ def test_quest3_reel_composes_while_the_render_runs(quest3_run):
     for (x0, y0, x1, y1), cid in zip(lay.boxes, clips, strict=True):
         tile = poster[y0:y1, x0:x1]
         assert (tile[..., 0] - tile[..., 1] > 100).mean() > 0.05, cid      # every contact on the poster
+
+
+def test_quest3_reel_leaves_out_renders_of_an_earlier_moveset(quest3_run, monkeypatch):
+    """The Naomi moveset built again with new hands: a reel composed while its clips render again plays only the
+    renders made from the new build, and the site copy left from an earlier compose of an outdated clip goes."""
+    cfg = quest3_run
+    run = cfg.run
+    rdir, tiles = run.motion_renders_for("quest3"), mc.tiles_dir(cfg, "quest3")
+    _moveset_built(run, rdir, old=("serve_00m01s",))
+    tiles.mkdir(parents=True)
+    for s in (".mp4", ".jpg"):                       # serve_00m01s's site copy from the reel of the earlier build
+        (tiles / f"serve_00m01s{s}").write_bytes(b"x")
+    logs: list[str] = []
+    monkeypatch.setattr(mc, "log", logs.append)
+    report = mc.run(cfg, profile="quest3")
+    clips = {c["id"]: c for c in report["clips"]}
+    assert list(clips) == ["serve_00m02s", "forehand_00m03s"] and all(c["mp4"] for c in clips.values())
+    assert report["groups"] == [{"stroke": "serve", "clips": ["serve_00m02s"]},
+                                {"stroke": "forehand", "clips": ["forehand_00m03s"]}]
+    assert json.loads(mc.profile_report(cfg, "quest3").read_text())["clips"] == report["clips"]
+    assert sorted(p.name for p in tiles.iterdir()) == sorted(f"{c}.{s}" for c in clips for s in ("mp4", "jpg"))
+    assert (rdir / "serve_00m01s.mp4").exists()                         # the render itself is left alone
+    summary = next(m for m in logs if m.startswith("reel quest3:"))
+    assert summary.startswith("reel quest3: 2 clips (2 missing, 1 of them outdated: older than the moveset), ")
+    [warn] = [m for m in logs if "older than naomi_moveset.glb" in m]
+    assert warn.startswith("[yellow]1 of them have a quest3 render older than naomi_moveset.glb") and \
+        warn.endswith(": serve_00m01s[/]")

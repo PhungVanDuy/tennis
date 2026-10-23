@@ -217,6 +217,8 @@ Two SMPL-X variants were tried and dropped. Grafting the leg weights of an SMPL-
 
 Known issues: the face is the generator's reading of a ~250 px face, close to the art but not its exact features (the art team's own model file would settle that); on Hi3D's mesh the white of the top's armhole stretches onto the upper arm when the arm swings forward (Meshy's auto-weights at the armhole); the ponytail and skirt have no bones of their own and follow the head and thighs.
 
+**Handing it to a game team.** The moveset GLB and FBX are what a game engine imports; the Quest 3 videos only preview them. [game-handoff.md](game-handoff.md) lists what the files hold (280,416 triangles with two 8192 x 8192 maps, 54 joints with `Hips` as the root, 39 actions at 25 fps, the racket as a node under `RightHand`), what a game team usually needs that they lack (a Quest-weight mesh, a root bone, the racket as a prop on a socket, per-shot files, a shots metadata file, clean starts and ends), the caveats to pass on and the questions to ask the team.
+
 ## Inspecting the outputs
 
 Run `.venv/bin/r3d site` and `.venv/bin/r3d serve`, then open http://127.0.0.1:8765/#/character. The page has a 3D viewer (switch between the Meshy and Tripo results and their variants, pick an animation, show the bones, turntable), statistics for the loaded model, and a Meshy-vs-Tripo table. Below that are the style sheet (hero, turnaround, the four views labelled by the side of her they show, and both prompts with their model) and every reference grouped by role.

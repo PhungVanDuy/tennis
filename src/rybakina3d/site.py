@@ -791,7 +791,9 @@ def _variant(cfg: Config, link: _Linker, name: str) -> dict | None:
     complete draft reel stays up. Its clips come from the report merged with renders.json, so clips rendered after
     the last compose show up too; each is linked as the full-resolution video + poster and, when motion-compose
     made one, the light tile + its poster (the grid only ever plays the tiles). A clip whose quest3 video already
-    exists links that one instead of the live profile's (`profile` says which). Results arrive progressively:
+    exists links that one instead of the live profile's (`profile` says which). A video older than the moveset GLB
+    shows an earlier build of the moveset and is not linked (`outdated`), and a clip without a current video links
+    no tile either (motion_compose.motion_clips leaves the same clips out of the reel). Results arrive progressively:
     whatever exists is linked, the rest is None, and `progress` counts the renders of every profile."""
     run = RunLayout(cfg.run.root, name)
     root = run.root
@@ -889,7 +891,9 @@ def _variant(cfg: Config, link: _Linker, name: str) -> dict | None:
             tile = _first(_report_path(root, tdir, r.get("tile")), tdir / f"{cid}.mp4")
             tile_poster = _first(_report_path(root, tdir, r.get("tile_poster")), tdir / f"{cid}.jpg")
             if outdated:
-                mp4 = poster = tile = tile_poster = None
+                mp4 = poster = None
+            if not mp4:   # a tile is a copy of the clip's render: without a current one it shows an earlier one
+                tile = tile_poster = None
             f = _file(link, mp4, rel(mp4)) if mp4 else None
             sources += [mp4] if f else []
             clips.append({

@@ -7,6 +7,7 @@ Related documents:
 - [setup.md](setup.md): installation, `.env`, the private inputs, and how to run and resume stages.
 - [motion-pipeline.md](motion-pipeline.md), [character.md](character.md) and [artwork.md](artwork.md): the design and results of the stages themselves.
 - [review-site.md](review-site.md): the review website.
+- [game-handoff.md](game-handoff.md): what the moveset files hold for a game engine and what a game team would still need.
 
 ## Principles
 
@@ -263,7 +264,7 @@ No stage reads a global "done" flag. Each stage decides for itself, as shown bel
 | artwork motion-render | per video of the profile: `fingerprint` unchanged and its files exist (video and poster, plus the matte for web) | re-renders all of that profile | the fingerprint is the GLB's SHA-1, `MOTION_VERSION`, `layout.MOTION` camera, size, samples, fps, paper colour, encoding, and the clip with its contact and frame count. Web's is the formula from before profiles; `quest3` and `draft` add the whole profile (minus `keep_frames`), the clips' rate and `PROFILE_VERSION`. Frames already rendered under the same render key (the fingerprint without paper and encoding, recorded in `blender.json`) are only re-encoded; `quest3` deletes its frames once encoded, so a change there renders again |
 | artwork motion-paint | per clip: `fingerprint` unchanged, no error, accepted video exists | repaints all | the fingerprint is the anchor key (render and matte bytes, `models.image_paint`, prompt, `FIRST_VERSION`), the video model and request, the matting model and `BACKGROUND`; cached records are re-judged against the current thresholds without a call; a failed call is retried on the next run |
 
-There is **no cross-stage dependency tracking**. A stage checks its own outputs, and the artwork stages also fingerprint their direct inputs. If you recompute something upstream (say `r3d remote motion --clip X --force`), re-run the stages after it yourself, or use `FROM=curate scripts/run_pipeline.sh`. The fingerprinted artwork stages notice a changed GLB or render on their own.
+There is **no cross-stage dependency tracking**. A stage checks its own outputs, and the artwork stages also fingerprint their direct inputs. If you recompute something upstream (say `r3d remote motion --clip X --force`), re-run the stages after it yourself, or use `FROM=curate scripts/run_pipeline.sh`. The fingerprinted artwork stages notice a changed GLB or render on their own, and `motion-compose` and the site leave out any render video older than the moveset GLB until `motion-render` makes it again ([artwork.md](artwork.md#motion-compose)).
 
 Partial files cannot pass for finished ones. `util.write_json` writes to a `.tmp` file and renames it. `media.run_ffmpeg` writes to `.<name>.part.<ext>` and renames on success, which is why both rsync directions exclude `*.part.*`. Arrays written with `np.savez` are not written atomically, except `camera.npz`, which `camera` writes as `camera.part.npz` and renames because `r3d remote` pushes it.
 
