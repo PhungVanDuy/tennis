@@ -393,7 +393,7 @@ Cycles renders each frame as one tile (`tile_size` raised to the frame size). Pa
 
 ### Measured
 
-One A100 40 GB, OptiX, Blender 5.2.2 LTS. `backhand_14m19s` is Rybakina's (58 clip frames, 139 output frames, contact on output frame 72), from `artwork/motion/render_quest3/renders.json` and `render_draft/renders.json`. The `quest3` column was measured at 32 samples, before the profile was set to 16. That render's fingerprint no longer matches, so the next `quest3` run renders it again; no 16-sample `quest3` time has been measured yet.
+One A100 40 GB, OptiX, Blender 5.2.2 LTS. `backhand_14m19s` is Rybakina's (58 clip frames, 139 output frames, contact on output frame 72), from `artwork/motion/render_quest3/renders.json` and `render_draft/renders.json`. The `quest3` column was measured at 32 samples, before the profile was set to 16. That render's fingerprint no longer matches, so the next `quest3` run renders it again. The 16-sample times are Naomi's full set, after the table.
 
 | | `quest3` (32 samples) | `draft` |
 |---|---|---|
@@ -402,7 +402,9 @@ One A100 40 GB, OptiX, Blender 5.2.2 LTS. `backhand_14m19s` is Rybakina's (58 cl
 | `backhand_14m19s`, checks | no empty or border frames; shadow flicker at most 0.74 grey levels | the same; at most 0.69 |
 | The moveset's 6065 frames at that rate | about 8.2 h | about 47 min |
 
-Encoding runs beside Blender (69 s for the `quest3` backhand). Naomi's full draft on the earlier Hunyuan3D character (archived in `archive/naomi_hunyuan/artwork/motion/render_draft/renders.json`, 39 clips, 6065 frames) took 4240 s of Blender time (about 71 min): 0.53 s Cycles and 0.09 s matte a frame, plus about 12 s of setup per clip (posing and measuring every output frame to fit the camera), against 1.5 s for Rybakina's backhand; that moveset had 200,402 triangles (the current Hi3D one 280,416), Rybakina's 25,004. Its 39 draft videos are 9.7 MB together (0.12 to 0.39 MB each), with 1.6 GB of PNG frames; no empty or border frames; the worst shadow flicker is 2.4 grey levels (median per clip 1.2); 101 to 260 px per metre at the camera target. With the GPU shared with another job, `quest3` on the Hi3D character ran at roughly 2.3 to 4.8 s of Cycles a frame at 16 samples.
+Encoding runs beside Blender (69 s for the `quest3` backhand). Naomi's full draft on the earlier Hunyuan3D character (archived in `archive/naomi_hunyuan/artwork/motion/render_draft/renders.json`, 39 clips, 6065 frames) took 4240 s of Blender time (about 71 min): 0.53 s Cycles and 0.09 s matte a frame, plus about 12 s of setup per clip (posing and measuring every output frame to fit the camera), against 1.5 s for Rybakina's backhand; that moveset had 200,402 triangles (the current Hi3D one 280,416), Rybakina's 25,004. Its 39 draft videos are 9.7 MB together (0.12 to 0.39 MB each), with 1.6 GB of PNG frames; no empty or border frames; the worst shadow flicker is 2.4 grey levels (median per clip 1.2); 101 to 260 px per metre at the camera target.
+
+Naomi's full `quest3` set on the Hi3D character (`variants/naomi/artwork/motion/render_quest3/renders.json`, 16 samples, 39 clips, 6065 frames, finished on 2026-10-23) took 23,076 s of Blender time (6.4 h): 2.56 s Cycles and 1.07 s matte a frame, plus 23 to 34 s of setup per clip. Encoding beside Blender took 3,094 s. `DETACH=1 scripts/render_quest3.sh` ran it on the host in 10 batches of 4 clips, 6 h 47 min from the first batch to the rebuilt site. The 39 videos are 76.4 MB together (0.92 to 3.01 MB each, median 2.03 MB), from 20.4 GB of PNG frames deleted batch by batch; no empty or border frames; the worst shadow flicker is 2.6 grey levels (median per clip 1.2); 407 to 1037 px per metre at the camera target. Single test clips earlier, with the GPU shared with another job, ran at roughly 2.3 to 4.8 s of Cycles a frame.
 
 ### The Quest 3 reel: `motion-compose --profile quest3`
 
@@ -433,6 +435,8 @@ Files under `artwork/motion/`:
 | `clips` | one row per clip in the reel: `id`, `stroke`, `flagged`, `mp4` (the full-size render), `poster`, `tile`, `tile_poster`, `size` (the render's), `fps`, `frames`, `contact_frame`, `mb` |
 | `made` | when the reel was composed |
 
+Naomi's Quest 3 reel (`variants/naomi/artwork/motion/naomi_moveset_reel_quest3.mp4`, composed on 2026-10-23 after the last batch) holds all 39 clips in 7 rows of 224 px tiles: 2064 x 2208, 60 fps, 312 frames (a 5.2 s loop), 3.96 MB. Its 39 site copies are 3.0 MB together.
+
 The Hunyuan draft reel (`archive/naomi_hunyuan/artwork/motion/naomi_moveset_reel_draft.mp4`) holds all 39 clips (12 serves, 12 forehands, 12 backhands, 1 slice, 2 overheads; 15 flagged) in 7 rows of 224 px tiles: 2064 x 2208, 60 fps, 312 frames (a 5.2 s loop), 3.7 MB. While it was being rendered in batches, the same reel was composed after each batch from the clips done so far (the partial reels, up to 36 clips, kept 232 px tiles).
 
 ### Running it for a variant
@@ -442,7 +446,7 @@ The Naomi variant (`configs/naomi.yaml`) shares the run's clips, curation and SM
 ```bash
 R3D_CONFIG=configs/naomi.yaml .venv/bin/r3d remote artwork motion-render --profile draft    # quick look (about 71 min for the Hunyuan draft)
 .venv/bin/r3d artwork motion-compose -c configs/naomi.yaml --profile draft
-R3D_CONFIG=configs/naomi.yaml .venv/bin/r3d remote artwork motion-render --profile quest3   # the deliverable (~8.2 h at 32 samples)
+R3D_CONFIG=configs/naomi.yaml .venv/bin/r3d remote artwork motion-render --profile quest3   # the deliverable (6.4 h of Blender time for Naomi)
 .venv/bin/r3d artwork motion-compose -c configs/naomi.yaml --profile quest3
 .venv/bin/r3d site                                       # default config: the variant section reads variants/ itself
 ```
@@ -516,5 +520,5 @@ A variant's files have the same names under `runs/rybakina/variants/<name>/artwo
 - **Hosted models are non-deterministic.** Re-running `paint` or `motion-paint` with `--force` gives different repaints. The caches are keyed on inputs and prompts so that ordinary re-runs do not call the models again.
 - **The Quest 3 set is flat and unpainted.** `quest3` renders one picture per clip at one eye's resolution, from one camera: there is no stereo pair. It writes no matte video, so `motion-paint` cannot run on it.
 - **60 fps is interpolated.** The captured motion is 25 fps. The 60 fps frames are Blender's linear interpolation between the retargeted keys, so they are smoother to watch but hold no more motion detail.
-- **`quest3` frames are not kept.** A change to its encoding renders the clips again (about 8.2 h for the moveset at the rate measured with 32 samples), where web and draft only re-encode their kept frames.
+- **`quest3` frames are not kept.** A change to its encoding renders the clips again (6.4 h of Blender time for Naomi's moveset), where web and draft only re-encode their kept frames.
 - **Partial reels.** A reel composed while `motion-render` is still running holds only the clips rendered so far. Once more clips are rendered, the review site marks the reel as older than the latest renders until `motion-compose --profile <profile>` runs again.

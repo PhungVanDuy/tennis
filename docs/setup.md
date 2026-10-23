@@ -380,21 +380,21 @@ anywhere in the repository.
 | `artwork render` | 13.7 s Cycles for the hero figure at 128 samples on the A100 | `artwork/renders/blender.json` |
 | `artwork paint` | 33–66 s per GPT Image call (median 46 s): 11 calls (13 samples, since the strict retry asks for 3) for 10 figures, 4 in parallel | `artwork/painted/paint.json` |
 | `artwork motion-render` | 2,681 frames (39 clips + 150-frame turntable): 3,554 s at 48 samples on one A100. At `layout.MOTION.samples = 64` the same frames take about 65 min (about 1.3 s a frame), so `motion_render.SAMPLES` caps it at 48. After OIDN, a 48-sample frame differs from a 64-sample one by 0.7/255 on average | `artwork/motion/render/renders.json`, `motion_render.py` |
-| `artwork motion-render --profile quest3` | 2064 × 2208 at 60 fps, 16 samples. Measured at 32 samples, before the profile was set to 16: 4.2 s Cycles + 0.64 s matte a frame on one A100 (Rybakina's `backhand_14m19s`, 139 frames). The moveset is 6,065 frames at 60 fps, about 8.2 h at that rate. A 2.3 s clip encodes to about 1.35 MB | `artwork/motion/render_quest3/renders.json`, `layout.PROFILES` |
+| `artwork motion-render --profile quest3` | 2064 × 2208 at 60 fps, 16 samples. Naomi's Hi3D set (39 clips, 6,065 frames): 2.56 s Cycles + 1.07 s matte a frame on one A100, 23,076 s of Blender time (6.4 h), 6 h 47 min as 10 batches of `DETACH=1 scripts/render_quest3.sh`; a clip encodes to 0.92 to 3.01 MB. Before the profile was set to 16 samples, Rybakina's `backhand_14m19s` (139 frames) took 4.2 s Cycles + 0.64 s matte a frame at 32 | `variants/naomi/artwork/motion/render_quest3/renders.json`, `artwork/motion/render_quest3/renders.json`, `layout.PROFILES` |
 | `artwork motion-render --profile draft` | 516 × 552 at 60 fps, 16 samples: 0.41 s Cycles + 0.05 s matte a frame on the same clip, about 47 min for the moveset. Naomi's full draft on the earlier Hunyuan character (39 clips, 6,065 frames) took 4,240 s of Blender time (about 71 min): 0.53 s + 0.09 s a frame and about 12 s of setup per clip | `artwork/motion/render_draft/renders.json`, `archive/naomi_hunyuan/artwork/motion/render_draft/renders.json` |
 | `artwork motion-paint` | Bernini-R takes about 10 min a clip, 8 clips in flight (`WORKERS`). List price `VIDEO_PRICE_USD_S = 0.08` per output second: the 39 clips go out as 2,615 frames (each padded to 4k+1), 104.6 s, about USD 8.4 for the video model alone. The frame-0 repaints and BiRefNet matting cost extra, and a clip whose anchor fails costs no video call. Per-clip `cost_usd` and the total go to `artwork/motion/painted/paint.json` | `motion_paint.py` |
 
 Disk for the Quest 3 set:
 
 - **GPU host.** A `quest3` frame is about 3.2 MB of PNGs (RGBA + matte; 438.5 MB for the 139-frame backhand at 32 samples),
-  about 19 GB for the moveset. `quest3` sets `keep_frames=False`, so each clip's PNGs are deleted after its video
-  is encoded, when the run's Blender job has finished. One run over the whole moveset therefore peaks near 19 GB;
-  `scripts/render_quest3.sh`'s batches of 4 clips peak at 4 clips' frames (about 0.6 GB per 194-frame serve). The
+  20.4 GB for Naomi's moveset. `quest3` sets `keep_frames=False`, so each clip's PNGs are deleted after its video
+  is encoded, when the run's Blender job has finished. One run over the whole moveset therefore peaks near 20 GB;
+  `scripts/render_quest3.sh`'s batches of 4 clips peak at 4 clips' frames (about 0.7 GB per 194-frame serve). The
   cost is that a changed `quest3` encoding renders again.
   `draft` keeps its frames, about 0.26 MB a frame (1.6 GB for the Hunyuan draft's 6,065), and so does `web`. All of them sit
   in `artwork/motion/frames/` (`frames/<profile>/` for `quest3` and `draft`), which is never pulled.
-- **Workstation.** Only the videos come back: about 1.35 MB per 2.3 s `quest3` clip, 0.12 to 0.39 MB per draft
-  clip (9.7 MB for the Hunyuan draft's 39), plus the reel (3.7 MB for that draft) and the 336 × 360 site copies that
+- **Workstation.** Only the videos come back: 0.92 to 3.01 MB per `quest3` clip (76.4 MB for Naomi's 39), 0.12 to 0.39 MB per draft
+  clip (9.7 MB for the Hunyuan draft's 39), plus the reels (3.96 MB for Naomi's Quest 3 reel, 3.7 MB for that draft) and the 336 × 360 site copies that
   `motion-compose` writes.
 
 ## Troubleshooting
