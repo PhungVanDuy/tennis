@@ -24,6 +24,21 @@ The rig's armature scale (Meshy: 0.01, centimetre bones) is applied on import: t
 Before retargeting, the skin can be fixed (job settings): coincident vertices welded (weld_m), the limb weights
 smoothed (smooth_limb_weights), then the leg weights replaced (leg_weights, see LEG_WEIGHTS) last: the smoothing
 still reads the auto-rig's weights (arms and skirt stay as they were) and cannot blur the new knee band.
+
+Hands (job settings, each off by default; the character's hand_rig.json, see blender/fingers.py):
+  grip "palm"   the racket seated on the palm skin (fingers.seat_frame) instead of grip_matrix's fixed offsets; the
+                right hand's keys carry a constant offset (q' = q x offset) so the racket stays aimed as before
+  fingers       15 finger bones per hand, added before the rig is read (so FK and the keys include them), their
+                share of the hand weight split off after the skin fixes; the right hand keyed in its grip, the left
+                relaxed (closed by left_hand_ik)
+  left_hand_ik  after the feet are planted, the left arm turned so the left palm holds the handle where the wrists
+                are close (blender/twohand.py), then FK again: joint tracks, QA and the check renders see it; the
+                left fingers close as the hand comes down onto the handle, and the hand's skin (fingers.hand_points)
+                is kept out of the racket
+  grip_metrics  per clip, on every frame: hand vertices inside the handle and inside the racket (handle, shaft and
+                throat; a clip warning past INSIDE_WARN), the palm skin's gap to the handle, the butt past the wrist,
+                the left palm on the handle, the racket's elevation around contact, the left palm's largest step (on
+                with any of these)
 """
 
 from __future__ import annotations
@@ -114,6 +129,13 @@ LEG_WEIGHTS = ("meshy", "band")
 KNEE_BAND_CM = 5.0       # band: default half-width
 WEIGHT_EPS = 1e-5        # weights below this are dropped from a vertex group
 
+# Grip metrics (settings["grip_metrics"]): a hand's vertices = those whose weight on the hand bone and its finger bones
+# adds up to more than HAND_VERTEX_WEIGHT (the same set with or without fingers); a clip warns where more of one hand's
+# vertices than INSIDE_WARN are inside the racket (the solved grips leave 4 and ~25 inside, the pads sunk into the grip)
+HAND_VERTEX_WEIGHT = 0.5
+INSIDE_WARN = 30
+LEFT_ON_WEIGHT = 0.5     # the left hand counts as on the racket above this two-hand weight
+
 
 # --------------------------------------------------------------------------------------------- rotations
 def axis_angle_to_matrix(aa: np.ndarray) -> np.ndarray:
@@ -160,6 +182,15 @@ def quat_to_matrix(q: np.ndarray) -> np.ndarray:
         2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
         2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y),
     ], -1).reshape(q.shape[:-1] + (3, 3))
+
+
+def quat_mul(q: np.ndarray, r: np.ndarray) -> np.ndarray:
+    """Hamilton product of (..., 4) quaternions (w, x, y, z): the rotation q @ r (r first)."""
+    q, r = np.asarray(q, np.float64), np.asarray(r, np.float64)
+    w1, x1, y1, z1 = np.moveaxis(q, -1, 0)
+    w2, x2, y2, z2 = np.moveaxis(r, -1, 0)
+    return np.stack([w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                     w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2], -1)
 
 
 def rotation_between(u: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -512,10 +543,59 @@ def plant_feet(root: np.ndarray, feet_rel: np.ndarray, contact: np.ndarray, rest
     return path, g, method
 
 
+def _script(name: str):
+    """A sibling script of this one (fingers, twohand): the package module when this file was imported as one,
+    else the top-level module next to it (inside Blender, main() puts this folder on sys.path)."""
+    import importlib
+
+    return importlib.import_module(f"{__package__}.{name}" if __package__ else name)
+
+
+def left_arm(rig: Rig, mapping: dict[str, str]):
+    """twohand.LeftArm of the mapped bones (the left collar when there is one)."""
+    ix = rig.index
+    return _script("twohand").LeftArm(upper=ix[mapping["left_shoulder"]], fore=ix[mapping["left_elbow"]],
+                                      hand=ix[mapping["left_wrist"]], right_hand=ix[mapping["right_wrist"]],
+                                      collar=ix.get(mapping.get("left_collar")))
+
+
+def smpl_wrist_distance(motion: dict) -> np.ndarray:
+    """(L,) distance between GVHMR's wrists (m): the two-hand weight's thresholds were set on it."""
+    jw = np.asarray(motion["joints_world"], np.float64)
+    return np.linalg.norm(jw[:, J["left_wrist"]] - jw[:, J["right_wrist"]], axis=-1)
+
+
+def _left_hand_ik(rig: Rig, mapping: dict[str, str], animated: list[int], basis_s: np.ndarray, quats: np.ndarray,
+                  pose: np.ndarray, motion: dict, fps: float, spec: dict) -> tuple[np.ndarray, ...]:
+    """twohand.left_hand_on_racket on the planted pose; the changed bones' keys rebuilt from its rotations (sign
+    continuity only: they are already smooth). Returns (basis_s, quats, weight (L,), finger closing (L,), info)."""
+    bones = left_arm(rig, mapping)
+    basis_s, w, closed, info = _script("twohand").left_hand_on_racket(
+        rig.rest, rig.parents, basis_s, pose, spec["racket_in_hand"], bones, spec.get("palm_centre"),
+        spec.get("palm_normal"), spec.get("handle_dir"), wrist_dist=smpl_wrist_distance(motion), fps=fps,
+        params=spec.get("params"), hand_points=spec.get("hand_points"), racket_shape=spec.get("racket_shape"))
+    chain = [b for b in (bones.collar, bones.upper, bones.fore, bones.hand) if b is not None]
+    cols = [animated.index(b) for b in chain]
+    quats = quats.copy()
+    quats[:, cols] = smooth_quats(matrix_to_quat(basis_s[:, chain]), 0)
+    basis_s[:, chain] = quat_to_matrix(quats[:, cols])
+    return basis_s, quats, w, closed, info
+
+
 def retarget(rig: Rig, mapping: dict[str, str], motion: dict, smooth_window: int = 0,
              ground_from_contacts: bool = True, foot_lock: bool = FOOT_LOCK,
-             align: tuple[str, ...] = ALIGN_JOINTS, max_float: float | None = None) -> dict:
-    """One motion.npz (as a dict) -> pose-bone keys for the rig, world positions, grounding info."""
+             align: tuple[str, ...] = ALIGN_JOINTS, max_float: float | None = None,
+             hand_offset: np.ndarray | None = None, left_ik: dict | None = None, finger_tracks=None) -> dict:
+    """One motion.npz (as a dict) -> pose-bone keys for the rig, world positions, grounding info.
+
+    Hands (None = off: the result is the one from before them): hand_offset (w, x, y, z) right-multiplies the
+    right hand's smoothed keys (grip "palm", fingers.seat_frame's offset_quat); left_ik {"racket_in_hand" (4,4) the
+    racket in the right-hand bone's frame, "palm_centre" / "palm_normal" / "handle_dir" in the left-hand bone's
+    frame or None, "params" twohand.Params or None, "hand_points" (fingers.hand_points) / "racket_shape" or None}
+    puts the left hand on the handle after the feet are planted (twohand; with the hand's skin points it also
+    keeps it off the racket); finger_tracks(frames, left closing (L,)) -> (bone names, (L,K,4) keys) adds the
+    finger bones (fingers.finger_tracks; the left hand closes as it comes down onto the handle). FK runs again
+    after either, so the poses, joint tracks and heads include them."""
     C = Y_UP_TO_Z_UP
     G = C @ smpl_global_rotations(motion["global_orient"], motion["body_pose"]) @ C.T
     L = len(G)
@@ -555,6 +635,9 @@ def retarget(rig: Rig, mapping: dict[str, str], motion: dict, smooth_window: int
 
     animated = sorted(joint_of, key=lambda b: rig.order.index(b))
     quats = smooth_quats(matrix_to_quat(basis[:, animated]), smooth_window)
+    if hand_offset is not None:  # a constant right factor: the same as offsetting before the (linear) smoothing
+        k = animated.index(rig.index[mapping["right_wrist"]])
+        quats[:, k] = quat_mul(quats[:, k], hand_offset)
     if smooth_window and smooth_window >= 3:
         hips_world = savgol(hips_world, smooth_window)
     hips_world[:, :2] -= hips_world[0, :2]  # smoothing moves the first frame: start at the origin again
@@ -578,6 +661,19 @@ def retarget(rig: Rig, mapping: dict[str, str], motion: dict, smooth_window: int
         warnings.append("no static foot frames: grounded on the lowest foot")
     loc = root_loc(path)
     P = forward_kinematics(rig, basis_s, root, loc)
+    left_w = left_closed = left_info = None
+    if left_ik is not None:  # only the left arm moves: the planted feet stay as they are
+        basis_s, quats, left_w, left_closed, left_info = _left_hand_ik(rig, mapping, animated, basis_s, quats, P,
+                                                                       motion, fps, left_ik)
+    if finger_tracks is not None:
+        names, keys = finger_tracks(L, np.zeros(L) if left_closed is None else left_closed)
+        if names:
+            fbones = [rig.index[n] for n in names]
+            animated = animated + fbones
+            quats = np.concatenate([quats, keys], 1)
+            basis_s[:, fbones] = quat_to_matrix(keys)
+    if left_ik is not None or finger_tracks is not None:
+        P = forward_kinematics(rig, basis_s, root, loc)
     heads = rig.world(P[..., :3, 3])
 
     lowest = (heads[:, fb, 2] - rest_heads[fb, 2]).min(1)
@@ -593,7 +689,9 @@ def retarget(rig: Rig, mapping: dict[str, str], motion: dict, smooth_window: int
                         f"at frame {int(pops.argmax())}), clamped")
 
     mapped = [j for j in SMPL_JOINTS if j in mapping]
+    hands = {} if left_ik is None else {"left_weight": left_w, "left_closed": left_closed, "left_ik": left_info}
     return {
+        **hands,
         "frames": L,
         "animated": [rig.names[b] for b in animated],
         "quats": quats.astype(np.float32),
@@ -661,6 +759,89 @@ def knee_band(co: np.ndarray, w_thigh: np.ndarray, w_shin: np.ndarray, point: np
     t = t * t * (3 - 2 * t)
     total = np.asarray(w_thigh, np.float64) + np.asarray(w_shin, np.float64)
     return total * (1 - t), total * t
+
+
+# ------------------------------------------------------------------------------------------------- grip
+def grip_matrix(rig: Rig, mapping: dict[str, str]) -> np.ndarray:
+    """The racket's rest world matrix in the fixed eastern forehand grip on the right-hand bone (racket.py's frame:
+    origin at the butt, +Y along the shaft, +Z the string normal = the palm normal, towards the pelvis at rest)."""
+    hand = rig.index[mapping["right_wrist"]]
+    heads = rig.rest_heads_world()
+    wrist = heads[hand]
+    a = rig.obj_rot @ rig.rest[hand, :3, 1]  # bone Y = the hand's long axis
+    to_body = heads[rig.index[mapping["pelvis"]]] - wrist
+    to_body[2] = 0
+    n = to_body - np.dot(to_body, a) * a                 # palm normal: towards the body at rest
+    n /= np.linalg.norm(n)
+    thumb = np.cross(a, n)                               # right hand: long axis x palm normal = thumb
+    th = math.radians(GRIP_ANGLE_DEG)
+    r = math.cos(th) * a + math.sin(th) * thumb
+    palm = wrist + a * PALM_OFFSET_M + n * PALM_DEPTH_M
+    M = np.eye(4)
+    M[:3, 0], M[:3, 1], M[:3, 2] = np.cross(r, n), r, n  # racket +Y along the shaft, +Z = string normal
+    M[:3, 3] = palm - r * GRIP_FROM_BUTT_M
+    return M
+
+
+def racket_shape(fg):
+    """twohand.RacketShape of the racket fingers.inside_racket tests (racket.py's dimensions, mirrored there)."""
+    return _script("twohand").RacketShape(
+        handle_radius=fg.HANDLE_RADIUS, handle_length=fg.HANDLE_LENGTH, butt_radius=fg.BUTT_RADIUS,
+        butt_length=fg.BUTT_LENGTH, throat_y=fg.THROAT_Y, shaft_half=tuple(fg.SHAFT_HALF),
+        arm_end=tuple(fg.THROAT_ARM_END), arm_half=tuple(fg.THROAT_ARM_HALF))
+
+
+def racket_in_bone(rig: Rig, bone: str, racket_world: np.ndarray) -> np.ndarray:
+    """(4,4) a racket rest world matrix in a bone's frame: the racket at frame t is rig.obj @ pose[t, bone] @ it."""
+    return np.linalg.inv(rig.rest[rig.index[bone]]) @ np.linalg.inv(rig.obj) @ np.asarray(racket_world, np.float64)
+
+
+def linear_blend_skin(co: np.ndarray, weights: np.ndarray, rig: Rig, pose: np.ndarray) -> np.ndarray:
+    """(L, N, 3) world positions of vertices co (N,3, rest world) with normalised weights (N,B) over the rig's bones
+    at the armature-space pose (L,B,4,4), as Blender's armature modifier skins them: the bones' pose matrices (each
+    times its inverse rest) blended linearly."""
+    inv_rest = np.linalg.inv(rig.obj @ rig.rest)
+    co = np.c_[np.asarray(co, np.float64), np.ones(len(co))]
+    weights = np.asarray(weights, np.float64)
+    out = np.zeros((len(pose), len(co), 3))
+    for b in np.flatnonzero(weights.max(0) > 0):
+        M = rig.obj @ pose[:, b] @ inv_rest[b]
+        out += weights[:, b][None, :, None] * np.einsum("lij,nj->lni", M[:, :3], co)
+    return out
+
+
+def grip_track_metrics(rig: Rig, mapping: dict[str, str], pose: np.ndarray, racket_in_hand: np.ndarray,
+                       contact: int, wrist_dist: np.ndarray, left_palm: tuple | None = None,
+                       weight: np.ndarray | None = None) -> dict:
+    """The grip metrics read off the numpy pose (L,B,4,4), every frame: the butt's distance past the right wrist
+    joint along the hand bone; the racket's elevation (its shaft above the horizontal, deg) at contact-1..contact+1;
+    where the left hand is on the racket (weight > LEFT_ON_WEIGHT: the IK's when it ran, else
+    twohand.two_hand_weight of the wrist distance) the left palm centre's distance to the racket axis and how far
+    the palm faces away from it (twohand.palm_on_handle); the left palm centre's largest step from one frame to the
+    next. left_palm: (centre, normal) in the left-hand bone's frame (fingers.palm_in_bone), default
+    twohand.default_palm."""
+    twohand = _script("twohand")
+    bones = left_arm(rig, mapping)
+    L, s = len(pose), rig.obj_scale
+    shaft = np.einsum("ij,lj->li", rig.obj_rot, twohand._frames(pose[:, bones.right_hand] @ racket_in_hand)[:, :3, 1])
+    elevation = np.degrees(np.arcsin(np.clip(shaft[:, 2], -1.0, 1.0)))
+    centre, normal = left_palm if left_palm is not None else twohand.default_palm(rig.rest, bones.hand,
+                                                                                 bones.right_hand)
+    w = twohand.two_hand_weight(wrist_dist) if weight is None else np.asarray(weight, np.float64)
+    on = w > LEFT_ON_WEIGHT
+    dist, facing = twohand.palm_on_handle(pose, racket_in_hand, bones, centre, normal)
+    H = pose[:, bones.hand]
+    palm = np.einsum("lij,j->li", H[:, :3, :3], centre) + H[:, :3, 3]
+    step = np.linalg.norm(np.diff(palm, axis=0), axis=-1) * s if L > 1 else np.zeros(1)
+    return {
+        "butt_past_wrist_cm": round(float(racket_in_hand[1, 3]) * s * 100, 2),
+        "racket_elevation_deg": {str(f): round(float(elevation[f]), 1)
+                                 for f in sorted({int(np.clip(contact + d, 0, L - 1)) for d in (-1, 0, 1)})},
+        "left_weight": "ik" if weight is not None else "wrists", "left_on_frames": int(on.sum()),
+        "left_palm_to_axis_cm": twohand._summary(dist[on] * s * 100, 1.0),
+        "left_palm_facing_deg": twohand._summary(facing[on], 1.0, 0),
+        "left_palm_max_step_cm": round(float(step.max()) * 100, 1), "left_palm_max_step_at": int(step.argmax()) + 1,
+    }
 
 
 # ============================================================================== Blender side (bpy below)
@@ -891,27 +1072,17 @@ def _fk_error_mm(arm, rig: Rig, res: dict, frame: int) -> float:
     return err * 1000
 
 
-def attach_racket(arm, rig: Rig, mapping: dict[str, str], colors: dict | None = None) -> dict:
-    """Build the racket and parent it to the right-hand bone in an eastern forehand grip (rest pose)."""
+def attach_racket(arm, rig: Rig, mapping: dict[str, str], colors: dict | None = None,
+                  frame: np.ndarray | None = None) -> dict:
+    """Build the racket and parent it to the right-hand bone at its rest world matrix `frame` (default: the fixed
+    eastern forehand grip, grip_matrix; grip "palm": fingers.seat_frame's seat on the palm)."""
     import racket
 
     hand, forearm = mapping.get("right_wrist"), mapping.get("right_elbow")
     if hand is None or forearm is None:
         return {"error": "no right hand / forearm bone"}
-    heads = rig.rest_heads_world()
-    wrist = heads[rig.index[hand]]
-    a = rig.obj_rot @ rig.rest[rig.index[hand], :3, 1]  # bone Y = the hand's long axis
-    to_body = heads[rig.index[mapping["pelvis"]]] - wrist
-    to_body[2] = 0
-    n = to_body - np.dot(to_body, a) * a                 # palm normal: towards the body at rest
-    n /= np.linalg.norm(n)
-    thumb = np.cross(a, n)                               # right hand: long axis x palm normal = thumb
-    th = math.radians(GRIP_ANGLE_DEG)
-    r = math.cos(th) * a + math.sin(th) * thumb
-    palm = wrist + a * PALM_OFFSET_M + n * PALM_DEPTH_M
-    M = np.eye(4)
-    M[:3, 0], M[:3, 1], M[:3, 2] = np.cross(r, n), r, n  # racket +Y along the shaft, +Z = string normal
-    M[:3, 3] = palm - r * GRIP_FROM_BUTT_M
+    M = grip_matrix(rig, mapping) if frame is None else np.asarray(frame, np.float64)
+    r, n = M[:3, 1], M[:3, 2]
 
     obj = racket.build("Racket", arm.users_collection[0], colors)
     obj.parent = arm
@@ -930,6 +1101,104 @@ def attach_racket(arm, rig: Rig, mapping: dict[str, str], colors: dict | None = 
             "placement_error_mm": float(np.abs(placed[:3, 3] - M[:3, 3]).max() * 1000),
             "butt_world": M[:3, 3].round(4).tolist(), "axis_world": r.round(3).tolist(),
             "string_normal_world": n.round(3).tolist(), "triangles": racket.triangle_count(obj)}
+
+
+class GripProbe:
+    """The grip metrics that need the skin, on every frame of a clip. Each hand's vertices (rest world positions and
+    weights over the rig's bones, read once after the skin fixes) are skinned in numpy from the clip's pose as
+    Blender's armature modifier does it (the bones' pose matrices blended linearly, weights normalised), checked
+    against Blender's evaluated mesh on one frame. Per frame and hand: vertices inside the handle
+    (fingers.inside_handle) and inside the racket's handle, shaft and throat (fingers.inside_racket); the right palm
+    skin's gaps to the handle (fingers.palm_gap; the palm skin points of hand_rig matched to the mesh at rest,
+    MATCH_TOL_M)."""
+
+    def __init__(self, fg, rig: Rig, mapping: dict[str, str], hand_rig: dict | None):
+        self.fg, self.rig = fg, rig
+        self.meshes, self.counts = [], {}
+        palm = hand_rig["arrays"]["Right_palm"].astype(np.float64) if fg.side_ok(hand_rig, "Right")[0] else None
+        for o in _skinned_meshes():
+            sides = {}
+            for side in fg.SIDES:
+                hand = mapping.get(f"{side.lower()}_wrist")
+                if hand is None or hand not in o.vertex_groups:
+                    continue
+                v = np.flatnonzero(_read_weights(o, [hand, *fg.bone_names(hand)]).sum(1) > HAND_VERTEX_WEIGHT)
+                if len(v):
+                    sides[side] = v
+                    self.counts[side] = self.counts.get(side, 0) + len(v)
+            if not sides:
+                continue
+            verts = np.unique(np.concatenate(list(sides.values())))
+            W = _read_weights(o, rig.names, verts)
+            co = _world_co(o)[verts]
+            skin = None
+            if palm is not None and "Right" in sides:
+                right = np.searchsorted(verts, sides["Right"])
+                c = co[right]
+                d2 = np.sum(palm ** 2, 1)[:, None] - 2 * palm @ c.T + np.sum(c ** 2, 1)[None]
+                near = np.argmin(d2, 1)
+                ok = np.sqrt(np.maximum(d2[np.arange(len(palm)), near], 0.0)) <= fg.MATCH_TOL_M
+                skin = np.unique(right[near[ok]])
+            self.meshes.append({"obj": o, "verts": verts, "co": co, "w": W / np.maximum(W.sum(1, keepdims=True), 1e-12),
+                                "sides": {k: np.searchsorted(verts, v) for k, v in sides.items()}, "skin": skin})
+
+    def side_skin(self, side: str) -> tuple[np.ndarray, np.ndarray]:
+        """One hand's vertices over every mesh: rest world positions (V,3) and normalised weights (V,B)."""
+        parts = [(m["co"][m["sides"][side]], m["w"][m["sides"][side]]) for m in self.meshes if side in m["sides"]]
+        if not parts:
+            return np.zeros((0, 3)), np.zeros((0, len(self.rig.names)))
+        return np.concatenate([c for c, _ in parts]), np.concatenate([w for _, w in parts])
+
+    def skin(self, mesh: dict, pose: np.ndarray) -> np.ndarray:
+        """(L, N, 3) world positions of a mesh's hand vertices over the armature-space pose (L,B,4,4)."""
+        return linear_blend_skin(mesh["co"], mesh["w"], self.rig, pose)
+
+    def check_mm(self, pose: np.ndarray, frame: int) -> float:
+        """The numpy skin against Blender's evaluated mesh at `frame` of the assigned action (largest gap, mm)."""
+        bpy.context.scene.frame_set(frame)
+        dg = bpy.context.evaluated_depsgraph_get()
+        worst = 0.0
+        for m in self.meshes:
+            ev = m["obj"].evaluated_get(dg)
+            me = ev.to_mesh()
+            co = np.empty(len(me.vertices) * 3)
+            me.vertices.foreach_get("co", co)
+            ev.to_mesh_clear()
+            W = np.array(m["obj"].matrix_world)
+            co = co.reshape(-1, 3)[m["verts"]] @ W[:3, :3].T + W[:3, 3]
+            worst = max(worst, float(np.linalg.norm(co - self.skin(m, pose[frame:frame + 1])[0], axis=1).max()))
+        return worst * 1000
+
+    def clip(self, pose: np.ndarray, racket_in_hand: np.ndarray, hand: str, contact: int) -> dict:
+        """Every frame's vertices inside the handle and inside the racket (per hand: its vertex count, median, max,
+        where, and on how many frames more than INSIDE_WARN), the right palm's gaps over all frames (min, 10th
+        percentile, mm; negative = the handle inside the skin) and the numpy skin's check at contact."""
+        rig, fg = self.rig, self.fg
+        racket = rig.obj @ pose[:, rig.index[hand]] @ racket_in_hand
+        racket[:, :3, :3] /= np.linalg.norm(racket[:, :3, :3], axis=1, keepdims=True)
+        L = len(pose)
+        handle = {s: np.zeros(L, int) for s in self.counts}
+        whole = {s: np.zeros(L, int) for s in self.counts}
+        gaps = []
+        for m in self.meshes:
+            X = self.skin(m, pose)
+            for t in range(L):
+                for side, v in m["sides"].items():
+                    handle[side][t] += int(fg.inside_handle(X[t, v], racket[t]).sum())
+                    whole[side][t] += int(fg.inside_racket(X[t, v], racket[t]).sum())
+                if m["skin"] is not None:
+                    gaps.append(fg.palm_gap(X[t, m["skin"]], racket[t]))
+        out = {}
+        for side, n in self.counts.items():
+            for key, k in (("inside_handle", handle[side]), ("inside_racket", whole[side])):
+                out[f"{side.lower()}_hand_{key}"] = {"vertices": n, "p50": float(np.median(k)), "max": int(k.max()),
+                                                    "max_at": int(k.argmax()),
+                                                    "frames_over": int((k > INSIDE_WARN).sum())}
+        g = np.concatenate(gaps) * 1000 if gaps else np.zeros(0)
+        out["palm_gap_mm"] = {"min": round(float(g.min()), 1), "p10": round(float(np.percentile(g, 10)), 1)} \
+            if len(g) else None
+        out["skin_check_mm"] = round(self.check_mm(pose, contact), 3)
+        return out
 
 
 class CheckRenderer:
@@ -1024,6 +1293,59 @@ def _export(job: dict) -> None:
     )
 
 
+def _hands_setup(settings: dict, rig: Rig, mapping: dict[str, str], fg, hand_rig: dict | None, hand_status: dict,
+                 finger_bones: list[str], seat: dict | None, racket_info: dict | None) -> tuple:
+    """What the hand settings add to every clip, once the racket is attached: retarget()'s hand keywords (the right
+    hand's offset, the left-hand IK, the finger tracks), the GripProbe, the report's "hands" block, the racket in the
+    right-hand bone's frame and the left palm (fingers.palm_in_bone). (None, ...) for each without a hand setting
+    or a racket."""
+    hand_kw, probe, hands_report, racket_in_hand, left_palm = {}, None, None, None, None
+    if fg is None or not racket_info or "error" in racket_info:
+        return hand_kw, probe, hands_report, racket_in_hand, left_palm
+    palm_seat = seat is not None and seat["source"] == "palm"
+    hand = mapping["right_wrist"]
+    racket_in_hand = racket_in_bone(rig, hand, seat["matrix"] if palm_seat else grip_matrix(rig, mapping))
+    if palm_seat:
+        racket_info.update(grip="palm", grip_angle_deg=seat["seat"]["angle_deg"])
+        hand_kw["hand_offset"] = seat["offset_quat"]
+    if settings.get("left_hand_ik"):
+        above = _script("twohand").Params().handle_above_palm_m
+        hand_kw["left_ik"] = {"racket_in_hand": racket_in_hand,
+                              **(fg.left_ik_palm(hand_rig, rig, mapping, above) or {})}
+    if finger_bones:
+        rest_rot = fg.bone_rest(rig)
+        hand_kw["finger_tracks"] = lambda n, w: fg.finger_tracks(hand_rig, {"Right": 1.0, "Left": w}, n, rest_rot)
+    probe = GripProbe(fg, rig, mapping, hand_rig)
+    left_points = None
+    if settings.get("left_hand_ik"):   # the left hand's skin, pushed off the racket by the IK (twohand.push_off)
+        left_points = fg.hand_points(hand_rig, rig, "Left", *probe.side_skin("Left"))
+        if left_points is not None:
+            hand_kw["left_ik"].update(hand_points=left_points, racket_shape=racket_shape(fg))
+    left_palm = fg.palm_in_bone(hand_rig, rig, "Left")
+    hands_report = {
+        "settings": {**{k: settings.get(k) for k in ("grip", "fingers", "left_hand_ik")},
+                     "hand_rig": settings.get("hand_rig_label")},   # relative to the run: no machine's paths
+        "hand_rig": hand_status, "finger_bones": len(finger_bones),
+        "hand_vertices": probe.counts, "left_palm": "hand_rig" if left_palm is not None else "default",
+        "left_ik_palm": ("seat" if hand_kw.get("left_ik", {}).get("handle_dir") is not None else "default")
+        if settings.get("left_hand_ik") else None,
+        "left_ik_skin_points": None if left_points is None else int(left_points.shape[1]),
+        "seat": None if seat is None else {k: (np.round(v, 5).tolist() if isinstance(v, np.ndarray) else v)
+                                           for k, v in seat.items()
+                                           if k not in ("matrix", "hand_seat", "offset_world", "fixed_matrix")},
+    }
+    if seat is not None and seat.get("warning"):
+        _log(f"racket seat: {seat['warning']}")
+    if palm_seat:
+        _log(f"racket seated on the palm: {seat['seat']['angle_deg']} deg across it, butt "
+             f"{racket_in_hand[1, 3] * 100:.1f} cm past the wrist, hand offset {seat['offset_deg']} deg")
+        if seat["seat"].get("clamped"):
+            _log(f"racket seat at its limits: {', '.join(seat['seat']['clamped'])} (fingers.seat_from_palm; tilt "
+                 f"{seat['seat']['tilt_deg']} deg, butt {seat['seat']['butt_past_wrist_m'] * 100:.1f} cm past "
+                 f"the wrist, {seat['seat']['angle_deg']} deg across)")
+    return hand_kw, probe, hands_report, racket_in_hand, left_palm
+
+
 def build(job: dict) -> dict:
     t0 = time.time()
     settings = job["settings"]
@@ -1033,6 +1355,20 @@ def build(job: dict) -> dict:
     weld = weld_meshes(float(settings["weld_m"])) if settings.get("weld_m") else None
     if weld:
         _log("welded " + ", ".join(f"{k}: {v['vertices_before']} -> {v['vertices']} vertices" for k, v in weld.items()))
+    grip = settings.get("grip", "fixed")
+    hands_on = bool(settings.get("grip_metrics") or settings.get("fingers") or settings.get("left_hand_ik")
+                    or grip != "fixed")
+    fg = _script("fingers") if hands_on else None
+    hand_rig = fg.load_hand_rig(settings["hand_rig"]) if hands_on and settings.get("hand_rig") else None
+    hand_status = {}
+    if hands_on:
+        for side in fg.SIDES:
+            ok, why = fg.side_ok(hand_rig, side)
+            hand_status[side] = "ok" if ok else why
+            if not ok and (settings.get("fingers") or grip == "palm"):
+                _log(f"hand rig, {side} hand: {why}; the fixed grip there")
+    # finger bones before the rig is read: Rig, FK and the keys then include them
+    finger_bones = fg.add_finger_bones(arm, hand_rig) if settings.get("fingers") and hand_rig else []
     rig = rig_from_blender(arm)
     mapping, map_info = map_bones(rig.names, rig.parents)
     missing = [j for j in ("pelvis", "left_hip", "right_hip", "left_knee", "right_knee", "left_shoulder",
@@ -1045,12 +1381,20 @@ def build(job: dict) -> dict:
     legs = apply_leg_weights(settings, rig, mapping)  # after the smoothing, which would blur them again
     if legs:
         skin_fix["leg_weights"] = legs
+    if finger_bones:  # after the smoothing too: the hand's weight is split, its blend into the forearm kept
+        skin_fix["finger_weights"] = fg.finger_weights(hand_rig)
     if skin_fix:
         _log(f"skin fixes: {skin_fix}")
     _log(f"rig: {len(rig.names)} bones, mapped {len(mapping)}/22, "
          f"unmapped bones {map_info['unmapped_bones']}")
-    racket_info = (attach_racket(arm, rig, mapping, settings.get("racket_colors"))
+    seat = fg.seat_frame(hand_rig, rig, mapping) if grip == "palm" else None
+    palm_seat = seat is not None and seat["source"] == "palm"
+    racket_info = (attach_racket(arm, rig, mapping, settings.get("racket_colors"),
+                                 seat["matrix"] if palm_seat else None)
                    if settings.get("racket", True) else None)
+    hand_kw, probe, hands_report, racket_in_hand, left_palm = _hands_setup(
+        settings, rig, mapping, fg, hand_rig, hand_status, finger_bones, seat, racket_info)
+    hand = mapping.get("right_wrist")
 
     out = job["out"]
     joints_dir = Path(out["joints_dir"])
@@ -1064,7 +1408,8 @@ def build(job: dict) -> dict:
         max_float = MAX_FLOAT_M.get(clip.get("stroke"), MAX_FLOAT_M["default"])
         res = retarget(rig, mapping, m, smooth_window=int(settings.get("smooth_window", 0)),
                        ground_from_contacts=bool(settings.get("ground_from_contacts", True)),
-                       foot_lock=bool(settings.get("foot_lock", FOOT_LOCK)), align=align, max_float=max_float)
+                       foot_lock=bool(settings.get("foot_lock", FOOT_LOCK)), align=align, max_float=max_float,
+                       **hand_kw)
         angles = res["align_deg"]
         clip_fps = float(m.get("fps", fps))
         if abs(clip_fps - fps) > 1e-3:
@@ -1075,6 +1420,16 @@ def build(job: dict) -> dict:
         _assign(arm, action, slot)
         contact = int(np.clip(clip.get("contact_index", res["frames"] // 2), 0, res["frames"] - 1))
         fk_mm = _fk_error_mm(arm, rig, res, contact)
+        grip_metrics = None
+        if probe is not None:
+            grip_metrics = grip_track_metrics(rig, mapping, res["pose"], racket_in_hand, contact,
+                                              smpl_wrist_distance(m), left_palm, res.get("left_weight"))
+            grip_metrics |= probe.clip(res["pose"], racket_in_hand, hand, contact)
+            for side in fg.SIDES:
+                k = grip_metrics.get(f"{side.lower()}_hand_inside_racket")
+                if k and k["frames_over"]:
+                    res["warnings"].append(f"{side.lower()} hand inside the racket: over {INSIDE_WARN} vertices on "
+                                           f"{k['frames_over']} frames (worst {k['max']} at frame {k['max_at']})")
         for f in clip.get("check_frames", []):
             f = int(np.clip(f, 0, res["frames"] - 1))
             bpy.context.scene.frame_set(f)
@@ -1107,9 +1462,21 @@ def build(job: dict) -> dict:
                                                                                 / cam_c["fx"])), 2)},
             "warnings": res["warnings"],
         }
+        if grip_metrics is not None:
+            clips[cid]["grip"] = grip_metrics
+        if res.get("left_ik") is not None:
+            clips[cid]["left_hand_ik"] = res["left_ik"]
         _log(f"{cid}: {res['frames']} frames, scale {res['scale']:.3f}, ground {res['ground'] * 100:+.1f} cm "
              f"({res['ground_method']}), fk {fk_mm:.2f} mm" + (f", {len(res['warnings'])} warnings"
                                                                if res["warnings"] else ""))
+        if grip_metrics is not None:
+            g = grip_metrics
+            right, left = (g.get(f"{k}_hand_inside_racket") or {} for k in ("right", "left"))
+            _log(f"{cid} grip: vertices inside the racket (worst frame) right {right.get('max')} of "
+                 f"{right.get('vertices')}, left {left.get('max')} of {left.get('vertices')}, palm gap "
+                 f"{g['palm_gap_mm']} mm, left palm to the handle axis {g['left_palm_to_axis_cm']} cm on "
+                 f"{g['left_on_frames']} frames, largest left palm step {g['left_palm_max_step_cm']} cm, numpy skin "
+                 f"{g['skin_check_mm']} mm off Blender's")
     renderer.remove()
     bpy.context.scene.frame_set(0)
     _export(job)
@@ -1122,7 +1489,8 @@ def build(job: dict) -> dict:
                 "armature_scale": round(rig.obj_scale, 6)},
         "mapping": mapping, **map_info,
         "alignment": {"aligned_joints": list(align), "rest_angle_deg": angles},
-        "racket": racket_info, "weld": weld, "skin_fix": skin_fix, "clips": clips, "renders": renders,
+        "racket": racket_info, "weld": weld, "skin_fix": skin_fix, **({"hands": hands_report} if hands_report else {}),
+        "clips": clips, "renders": renders,
         "outputs": {k: out[k] for k in ("glb", "fbx")},
         "blender": bpy.app.version_string, "seconds": round(time.time() - t0, 1),
     }
@@ -1162,10 +1530,27 @@ def _racket_rest_error(racket_obj, placed: dict) -> dict:
             "normal_deg": round(_angle_deg(F[:3, 2], np.array(placed["string_normal_world"])), 2)}
 
 
+def _finger_bones(report: dict) -> list[str]:
+    """The finger bones the build added (fingers.bone_names under the mapped hand bones), from its report."""
+    if not (report.get("hands") or {}).get("finger_bones"):
+        return []
+    fg, bones = _script("fingers"), set(report["rig"]["bones"])
+    hands = [report["mapping"].get(f"{s.lower()}_wrist") for s in ("Right", "Left")]
+    return [n for h in hands if h for n in fg.bone_names(h) if n in bones]
+
+
+def _keyed_bones(action, slot) -> set[str]:
+    from bpy_extras.anim_utils import action_get_channelbag_for_slot
+
+    bag = action_get_channelbag_for_slot(action, slot) if slot is not None else None
+    return {m.group(1) for fc in (bag.fcurves if bag else []) for m in [re.match(r'pose\.bones\["(.+?)"\]',
+                                                                                fc.data_path)] if m}
+
+
 def verify(job: dict) -> dict:
     """Fresh Blender: re-import the GLB (and the FBX). Checks the animation names and lengths, that every
-    clip replays the joint tracks `qa` reads (anim/joints), and that the racket sits in the right hand where
-    the build put it and stays there."""
+    clip replays the joint tracks `qa` reads (anim/joints), that the racket sits in the right hand where
+    the build put it and stays there, and that the finger bones (when built) are there and animated."""
     out = job["out"]
     clips = {c["id"]: c for c in job["clips"]}
     expected = sorted(clips)
@@ -1178,6 +1563,10 @@ def verify(job: dict) -> dict:
     actions = sorted(a.name for a in bpy.data.actions)
     res: dict = {"glb_actions": actions, "glb_names_match": actions == expected, "glb_racket_parent": None,
                  "glb_racket_rest": None, "glb_clips": {}}
+    fingers = _finger_bones(report)
+    if fingers:
+        res["glb_finger_bones"] = sum(n in arm.data.bones for n in fingers)
+        res["glb_finger_keys"] = {}
     if racket_obj is not None:
         parent = racket_obj.parent_bone or (racket_obj.parent.name if racket_obj.parent else None)
         res["glb_racket_parent"] = f"{racket_obj.parent_type}:{parent}"
@@ -1193,6 +1582,9 @@ def verify(job: dict) -> dict:
         ad.action = action
         if action.slots:
             ad.action_slot = action.slots[0]
+        if fingers:
+            keyed = _keyed_bones(action, action.slots[0] if action.slots else None)
+            res["glb_finger_keys"][cid] = sum(n in keyed for n in fingers)
         tracks = np.load(Path(out["joints_dir"]) / f"{cid}.npz")
         names = [str(n) for n in tracks["names"]]
         n = len(tracks["positions"])
@@ -1217,6 +1609,8 @@ def verify(job: dict) -> dict:
         bpy.ops.wm.read_factory_settings(use_empty=True)
         bpy.ops.import_scene.fbx(filepath=out["fbx"])
         res["fbx_actions"] = sorted(a.name for a in bpy.data.actions)
+        if fingers:
+            res["fbx_finger_bones"] = sum(n in _armature(out["fbx"]).data.bones for n in fingers)
         racket_obj = next((o for o in bpy.data.objects if o.name.startswith("Racket")), None)
         if racket_obj is not None and "butt_world" in placed:
             _rest_pose(_armature(out["fbx"]))
@@ -1236,7 +1630,9 @@ def main(argv: list[str]) -> None:
         _log(f"verify: GLB {len(res['glb_actions'])} actions (names match: {res['glb_names_match']}), "
              f"joint replay <= {max((c['joint_error_mm'] for c in clips), default=0):.3f} mm, "
              f"racket at rest {res['glb_racket_rest']}, FBX {len(res.get('fbx_actions', []))} actions, "
-             f"FBX racket {res.get('fbx_racket_rest') or res.get('fbx_error')}")
+             f"FBX racket {res.get('fbx_racket_rest') or res.get('fbx_error')}"
+             + (f", finger bones GLB {res['glb_finger_bones']} (animated {res['glb_finger_keys']}), FBX "
+                f"{res.get('fbx_finger_bones')}" if "glb_finger_bones" in res else ""))
     else:
         build(job)
 

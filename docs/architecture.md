@@ -75,7 +75,7 @@ The dotted edges into `site` stand for "reads everything". The site also reads t
 | `r3d remote motion` | GPU host | `motion/recover.py` | `clips/<id>/motion.npz`, `overlay.mp4`, `gvhmr/` |
 | `r3d remote curate` | GPU host (numpy) | `curate.py` | `curation.json`, refined contact in `clip.json` |
 | `r3d remote qa` | GPU host (numpy) | `qa.py` | `clips/<id>/qa.json`, `qa_summary.json` |
-| `r3d remote retarget` | GPU host (Blender) | `assemble.py`, `blender/retarget.py`, `blender/racket.py` | `anim/` |
+| `r3d remote retarget` | GPU host (Blender) | `assemble.py`, `blender/retarget.py`, `blender/racket.py`; with the hand settings also `blender/fingers.py`, `blender/twohand.py` and `character/hands.py` | `anim/`; with the hand settings `character/hand_rig.json` (+ `.npz`) when it is not fresh |
 | `r3d signature` | workstation | `signature.py` | `signature.json` |
 | `r3d artwork poses` | workstation | `artwork/poses.py` | `artwork/poses.json` |
 | `r3d remote artwork render` | GPU host (Blender Cycles) | `artwork/render.py`, `blender/artwork.py` | `artwork/renders/` |
@@ -160,6 +160,7 @@ In the table, `character/`, `anim/` and `artwork/` sit under `RunLayout.out`, an
 | `character/sheet/` (`hero.png`, `turnaround.png`, `views/`, `stylize.json`) | `sheet_dir`, `views_dir`, `stylize_report` | character stylize | workstation | mesh; paint and motion-paint (hero as identity); site |
 | `character/mesh/<generator>/`, `mesh.json` | `mesh_dir`, `mesh_report` | character mesh | workstation | site |
 | `character/rigged.glb` | `rig` | character mesh | workstation | retarget, site |
+| `character/hand_rig.json`, `.npz` | `hand_rig` | retarget (`character/hands.py`, when a hand setting is on) | where retarget runs | retarget |
 | `anim/rybakina_moveset.glb`, `.fbx` | `moveset_glb`, `moveset_fbx` | retarget | host | artwork render, motion-render, site |
 | `anim/retarget.json` | `retarget_report` | retarget | host | artwork render and motion-render (bone mapping), site |
 | `anim/joints/<id>.npz` | `joints_dir` | retarget | host | qa (second pass), artwork poses |
@@ -290,7 +291,7 @@ The YAML maps one-to-one onto Pydantic models. `run_dir`, `athlete`, `source`, `
 | `clips`, `track`, `motion` | GPU stages | |
 | `character` | mesh (height, triangle budget, views, `geometry_resolution`, `mesh_primary`); `variant` (`RunLayout.out` / `stem`); `name` (`Config.display_name`); `refs_dir` (refs and stylize take the art-team path, `character/art.py`, and mesh sends the art front as Meshy's texture guide); `racket_colors` (retarget → `blender/racket.py`) | the variant keys default to `None`; `configs/rybakina.yaml` sets none of them |
 | `curate` | curate | `keep_all: false` in code vs `true` in the YAML (every clip animated, failures only flagged) |
-| `retarget` | retarget | the skin fixes are off in code (`weld_m: 0`, `smooth_limb_weights: 0`, `leg_weights: meshy`; `knee_band_cm: 5.0` only matters for `band`); `configs/rybakina.yaml` sets none of them, `configs/naomi.yaml` all of them |
+| `retarget` | retarget | the skin fixes are off in code (`weld_m: 0`, `smooth_limb_weights: 0`, `leg_weights: meshy`; `knee_band_cm: 5.0` only matters for `band`); `configs/rybakina.yaml` sets none of them, `configs/naomi.yaml` all of them. The hand settings (`grip: fixed`, `fingers: false`, `left_hand_ik: false`, `grip_metrics: false`) are off in code and in `configs/rybakina.yaml`, `rybakina_5s.yaml` and `naomi_5s.yaml`; `configs/naomi.yaml` and `naomi_5s_grip.yaml` switch on `grip: palm`, `fingers` and `left_hand_ik` |
 | `site` | serve (`port: 8765`) | |
 
 Most thresholds are module constants, not config, and are named in the module that applies them: `ACCEPT_IOU = 0.85` in `artwork/paint.py`, `OVERHEAD_MIN_RISE_M = 0.25` and `SWING_MIN_SPEED_MS = 4.0` in `curate.py`, `MIN_OK_FRACTION = 0.90` and `MAX_CLIP_REPROJ_PX = 1.5` in `camera.py`, and the QA bands in `qa.py`. When a change to code alters what a cached artwork output looks like, bump that stage's version constant (`RENDER_VERSION`, `MOTION_VERSION`, `CUT_VERSION`, `FIRST_VERSION`) so the caches invalidate. `PROFILE_VERSION` in `motion_render.py` invalidates only the `quest3` and `draft` videos (sub-frame timing, scaled pixel constants).
@@ -318,11 +319,12 @@ Two thin modules wrap the hosted APIs. Stages pick model ids from `models:` in t
 
 ## Blender scripts
 
-Four drivers run Blender headless with a JSON job (`character face` on the workstation's Blender, the others on the GPU host):
+Five drivers run Blender headless, four of them with a JSON job (`character face` on the workstation's Blender, `character/hands.py` on whichever machine runs `retarget`, the others on the GPU host):
 
 | Driver | Script | Job and report |
 |---|---|---|
-| `assemble.py` (`r3d retarget`) | `blender/retarget.py` (+ `racket.py`) | `anim/job.json` → `anim/retarget.json`; a second run with `--verify` → `anim/verify.json`. The job's `settings` carry the skin fixes: `weld_m`, `smooth_limb_weights` and, from `assemble.leg_settings`, `leg_weights` and `knee_band_cm`. They apply in the order weld, limb smoothing, leg weights; `retarget.json` reports them under `weld` and `skin_fix` |
+| `assemble.py` (`r3d retarget`) | `blender/retarget.py` (+ `racket.py`) | `anim/job.json` → `anim/retarget.json`; a second run with `--verify` → `anim/verify.json`. The job's `settings` carry the skin fixes: `weld_m`, `smooth_limb_weights` and, from `assemble.leg_settings`, `leg_weights` and `knee_band_cm`. They apply in the order weld, limb smoothing, leg weights; `retarget.json` reports them under `weld` and `skin_fix`. From `assemble.hand_settings`, only when one is on: `grip`, `fingers`, `left_hand_ik`, `grip_metrics` and the path of `character/hand_rig.json` (`hand_rig`, and `hand_rig_label` relative to the run root for the report) (`blender/fingers.py` and `blender/twohand.py`, imported by `retarget.py` from its own folder); `retarget.json` adds `hands` and per clip `grip` (and `left_hand_ik`) |
+| `character/hands.py` (run by `assemble.ensure_hand_rig`, or `python -m rybakina3d.character.hands`) | `blender/fingers.py` (`export`) | no JSON job: `fingers.py -- export rigged.glb <tmp>.npz <weld_m>` writes the welded hand mesh to a temporary `.npz`; `hands.py` (scipy) turns it into `character/hand_rig.json` + `.npz` |
 | `artwork/render.py` | `blender/artwork.py` | `artwork/renders/job.json` → `artwork/renders/blender.json` |
 | `artwork/motion_render.py` | `blender/artwork_motion.py` (+ `artwork.py`) | `artwork/motion/frames/job.json` → `frames/<name>/blender.json` per video (web); `frames/<profile>/job.json` → `frames/<profile>/<name>/blender.json` for `quest3` and `draft` |
 | `character/face.py` (`r3d character face`) | `blender/face_project.py` | `character/face/job_render.json` → `render.png`, `camera.json`; then `job_bake.json` → `basecolor.png` |
@@ -333,7 +335,7 @@ The rules:
 - **Scripts in `src/rybakina3d/blender/` must not import `rybakina3d`.** They run in Blender's bundled Python, which has `bpy`, `mathutils`, `bmesh` and numpy but not this package or its dependencies. Constants they share with the package are mirrored, for example the SMPL joint list at the top of `retarget.py`. A script imports its sibling scripts by putting its own folder on `sys.path`.
 - Each script guards `import bpy` with `try` / `except ImportError` and only calls `main()` when `bpy` is present. The numpy half (rotations, retargeting, foot planting, camera framing, floor tracking) therefore imports in plain Python, and the unit tests exercise it.
 - Output protocol: stdout lines that start with `[r3d]` are relayed to the driver's log, and the full Blender output is appended to `blender.log` next to the job. `[r3d] done <name>` tells `motion-render` that a video's frames are complete, so it encodes that video while Blender renders the next one. On a non-zero exit, the driver raises with the last 25 lines of `blender.log`.
-- `retarget` checks its own export. A fresh Blender re-imports the GLB and FBX, and every clip must replay its joint track and keep the racket on the hand within `JOINT_TOL_MM = 1.0`, `RACKET_TOL_MM = 2.0`, `RACKET_TOL_DEG = 0.5` and `DRIFT_TOL_MM = 1.0`. Any violation is written to `retarget.json` under `problems` and then raised.
+- `retarget` checks its own export. A fresh Blender re-imports the GLB and FBX, and every clip must replay its joint track and keep the racket on the hand within `JOINT_TOL_MM = 1.0`, `RACKET_TOL_MM = 2.0`, `RACKET_TOL_DEG = 0.5` and `DRIFT_TOL_MM = 1.0`. With finger bones built, the GLB must also hold all of them, animated in every clip, and the FBX all of them. Any violation is written to `retarget.json` under `problems` and then raised.
 
 The current run's reports record Blender 5.2.2 LTS, with Cycles on an NVIDIA A100 through OptiX.
 
@@ -365,20 +367,24 @@ Tests that need ffmpeg (`test_artwork_motion_render.py`, `test_artwork_motion_co
 | Test file | Covers |
 |---|---|
 | `test_core.py` | IoU, track gap filling, index windowing and time fixing, SMPL FK and joint indices, `read_npz`, size score |
-| `test_selection.py` | contact refinement on the audio onset |
+| `test_selection.py` | contact refinement on the audio onset, the `source_span_s` filter |
 | `test_camera.py` | court model, homography decomposition, calibration of synthetic broadcast frames, zoom tracking with a fixed optical centre, the `camera.npz` contract |
 | `test_curate.py` | serve and groundstroke checks, contact refinement idempotence |
-| `test_qa.py` | skate, ground, jitter, depth share, reprojection, timing, the PASS / WARN / FAIL gate, `qa.run` reports |
-| `test_retarget_math.py` | rotation helpers, bone mapping (Meshy, Mixamo, Unreal names), world-rotation transfer, grounding, foot planting, depth-pop clamping, camera recovery |
-| `test_retarget_driver.py` | `motion.npz` validation, check-frame choice, the re-import gate |
+| `test_qa.py` | skate, ground, jitter, depth share, reprojection, timing, the PASS / WARN / FAIL gate, `qa.run` reports, the peak search window (a later stroke in a long clip) |
+| `test_retarget_math.py` | rotation helpers, bone mapping (Meshy, Mixamo, Unreal names), world-rotation transfer, grounding, foot planting, depth-pop clamping, camera recovery; the hand offset keeping the racket aimed, finger keys joining the FK, the grip probe's linear-blend skinning |
+| `test_retarget_driver.py` | `motion.npz` validation, check-frame choice, the re-import gate (finger bones included) |
 | `test_artwork_poses.py` | trophy, contact and start moments, slot choice, hero choice, facing and camera conventions, framing, shadow clean-up |
 | `test_artwork_compose.py` | aligned IoU, mask clean-up, feet-line placement, request size, paper colour, sheet and atlas layout, grip prompts |
 | `test_artwork_motion_render.py` | single-camera framing, floor track, turntable, shadow region, compositing, fingerprints, encoding, skip / re-encode / force; render profiles: web's unchanged fingerprint and encoder command, render keys, separate folders and frames, 60 fps frame times, portrait framing, scaled pixel constants, `quest3` encoding (High @ 5.2, no matte), `keep_frames`, which meshes count as the figure |
 | `test_artwork_motion_paint.py` | masks, IoU statistics, the 4k+1 plan, the frame map, video round-trip, plate and placement, flicker and drift, the judge, racket recall, fingerprints, the model guard |
 | `test_artwork_motion_compose.py` | reel timing (every contact on one frame, seamless loop), layout, paper estimate, the site's motion block; the fixed 2064 × 2208 canvas (fits without cropping, labels inside), contain-fit tiles, the variant caption, the `quest3` reel and its report, composing while the render runs |
 | `test_character_art.py` | the art-team path: request sizes, square views on one feet line, alpha cut-out; `character face`: the face oval, skin evening, detail transfer; `gltf.replace_image` |
+| `test_hand_settings.py` | the hand settings: off in `rybakina.yaml`, `rybakina_5s.yaml` and `naomi_5s.yaml` (no hand key in the whole job, no `hand_rig.json` made), on in `naomi.yaml` and `naomi_5s_grip.yaml`, `fingers` needing `grip: palm`, `hand_rig.json` remade when missing, stale, of another version or a failed export, and handed to the job only when fresh (its path in the report relative to the run) |
+| `test_hands.py` | `character/hands.py`'s failure paths: a coarse hand and a failed mesh export each give `"ok": false` (no arrays, no stale `.npz`), never an exception |
+| `test_fingers.py` | the racket seat on the palm, the limits it reports and its constant hand offset against the fixed grip, the QA handle cylinder, the whole lower racket (grip, shaft, throat arms) and the palm gap, finger pose blending, weight bands, the left palm for the IK; the mesh helpers of `character/hands.py` |
+| `test_twohand.py` | the left hand on the racket: two-bone IK, its bend plane holding as the target crosses a nearly straight arm, elbow cap and swivel, the two-hand weight with hysteresis, its filled dips, its ramps inside the window and slowed level by level only where the blend has far to go (`ramp_limit`), unwrapped angles and continuous quaternions, the collar, nothing else moving, the left fingers closing as the hand comes down onto the handle at a limited rate, the wrist's bend capped on the way, the blend without pops (also a serve letting go to toss while the arm turns over 150° from the IK), the push of the hand's skin out of the racket (`fingers.hand_points`, `RacketShape` against `fingers.inside_racket`); `retarget.grip_track_metrics` |
 | `test_leg_weights.py` | the leg skin weights: the knee plane and band (leg total kept), the modes matching the config; `assemble.leg_settings` per mode, Naomi's band, the default job unchanged |
-| `test_site_variants.py` | the site's variant sections: no `variants/` folder, links to what exists, draft live until `quest3` is composed, atlas order after a partial compose, renders only and moveset only, `variants` in `site.json` |
+| `test_site_variants.py` | the site's variant sections: no `variants/` folder, links to what exists, draft live until `quest3` is composed, atlas order after a partial compose, renders only and moveset only, `variants` in `site.json`; the limitations and next steps read off `retarget.json`'s hands |
 
 ## Adding a stage
 

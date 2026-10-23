@@ -326,7 +326,7 @@ Paths are relative to the project root. `config.py` holds the typed schema (`Con
 | `models` | `index`, `locate`: `gemini-3.8-flash`; `image_hero`, `image_views`: `gemini-3-pro-image`; `mesh`: Meshy 7.1; `mesh_alt`: Tripo H3.1; `rig`: Meshy rigging; `image_paint`: `openai/gpt-image-2.5/sunburst/edit`; `video_paint`: `fal-ai/bernini-r/reference-edit-video` | model ids per call site. `video_paint` must stay Bernini-R: `motion-paint` builds its request for that model and raises on any other value |
 | `shots` | `adaptive_threshold: 3.0`, `min_shot_s: 0.6` | PySceneDetect `AdaptiveDetector` sensitivity and minimum shot length |
 | `index` | `proxy_height: 360`, `chunk_s: 240`, `fps: 2.0` | upload proxy height; length of each Gemini window; frames per second Gemini samples |
-| `select` | `oversample: 2.0`; `strokes` (serve 6, forehand 6, backhand 6, slice 2, volley 2, overhead 1, celebration 2); `window_s` (serve 2.2 s before / 1.0 s after contact, celebration 0.6 / 2.4, default 1.3 / 1.0); `allowed_views: [main_broadcast, behind_low, side]`; `allow_slow_motion: false`; `min_quality: 3`; `onset_search_s: 0.5` | which shots qualify, how many clips per stroke (quota × `oversample` are cut), the clip window and the audio search radius. Fixed in code: an audio onset counts when its local z-score is above 2.5; a window covering less than 60 % of the wanted length scores 0; at most one clip per shot and stroke; contacts at least 1 s apart |
+| `select` | `oversample: 2.0`; `strokes` (serve 6, forehand 6, backhand 6, slice 2, volley 2, overhead 1, celebration 2); `window_s` (serve 2.2 s before / 1.0 s after contact, celebration 0.6 / 2.4, default 1.3 / 1.0); `allowed_views: [main_broadcast, behind_low, side]`; `allow_slow_motion: false`; `min_quality: 3`; `onset_search_s: 0.5`; `source_span_s: null` | which shots qualify, how many clips per stroke (quota × `oversample` are cut), the clip window and the audio search radius; with `source_span_s: [a, b]` only strokes inside that stretch of the source (seconds). Fixed in code: an audio onset counts when its local z-score is above 2.5; a window covering less than 60 % of the wanted length scores 0; at most one clip per shot and stroke; contacts at least 1 s apart |
 | `clips` | `model_fps: 30`, `time_mode: retime`, `preview_height: 720` | `retime` keeps every source frame and stamps it at GVHMR's 30 fps (no duplicated frames); the preview keeps the source rate |
 | `track` | `detector: yolo11x.pt`, `conf: 0.25`, `min_coverage: 0.7` | YOLO weights and confidence. Coverage below `min_coverage` warns in `track` and `qa`; below 0.5 (`qa.COVERAGE_FAIL`) `qa` fails the clip |
 | `motion` | `static_motion_px: 1.5`, `default_hfov_deg: 32`, `flip_test: true` | for clips without a calibration: background motion below `static_motion_px` counts as a static camera, and the lens comes from `VIEW_HFOV` in `motion/recover.py` (main_broadcast 38°, behind_low 42°, side 42°). `default_hfov_deg` applies only to views missing from that table, which `select` never passes. `flip_test` is GVHMR's test-time flip |
@@ -359,6 +359,9 @@ number, a string) replaces the base's. `configs/naomi.yaml` is `extends: rybakin
 | `retarget.weld_m` | `1.0e-5` | skinned-mesh vertices closer than this (metres) are merged before retargeting (`blender/retarget.py` `weld_meshes`); the default `0` keeps the mesh as shipped (Rybakina) |
 | `retarget.leg_weights` | `band` | the leg skin weights, replaced after the limb smoothing (`blender/retarget.py` `LEG_WEIGHTS`): `band` rebuilds each knee's thigh/shin split centred on the knee joint; `meshy` (the default) keeps the auto-rig's ([character.md](character.md#5-a-character-drawn-by-the-art-team-the-naomi-variant) says why Naomi needs `band`) |
 | `retarget.knee_band_cm` | `5.0` | the band's half-width either side of the knee plane (the code default too) |
+| `retarget.grip` | `palm` | the racket seated on the palm skin (see the hand settings below) |
+| `retarget.fingers` | `true` | 15 finger bones per hand (see the hand settings below) |
+| `retarget.left_hand_ik` | `true` | the left hand onto the handle in two-handed strokes (see the hand settings below) |
 | `character.mesh_primary` | `hi3d` | the generator whose rig becomes `character/rigged.glb` (`meshy`, `tripo`, `hunyuan` or `hi3d`) |
 | `character.racket_colors` | `frame`, `grip`, `strings` as linear RGB | the racket's colours, passed to `blender/racket.py` through the retarget job |
 | `models.mesh` | `""` | no Meshy generator for this variant |
@@ -366,6 +369,32 @@ number, a string) replaces the base's. `configs/naomi.yaml` is `extends: rybakin
 
 Everything else (athlete, source, remote, the other models, thresholds, `run_dir`) comes from `configs/rybakina.yaml`, so
 both configs share one run folder and one GPU-host layout.
+
+The hand settings: `configs/naomi.yaml` switches them on for the Naomi moveset, and `configs/naomi_5s_grip.yaml`
+(extends `naomi_5s.yaml`, `run_dir: runs/rybakina_5s_grip`) does the same on the 5 s clip. They are off in code and in
+`rybakina.yaml`, `rybakina_5s.yaml` and `naomi_5s.yaml`, so those jobs stay as they were:
+
+| Key | Value | What it does |
+|---|---|---|
+| `retarget.grip` | `palm` | the racket seated on the palm skin from `character/hand_rig.json` (`blender/fingers.py` `seat_frame`), with a constant right-hand offset that keeps the racket aimed as before; `fixed` (the default) keeps `attach_racket`'s offsets ([character.md](character.md#4-the-racket)) |
+| `retarget.fingers` | `true` | 15 finger bones per hand, the right hand keyed in its grip on the handle, the left relaxed or, with `left_hand_ik`, closed as far as the IK holds it on the handle; needs `grip: palm` |
+| `retarget.left_hand_ik` | `true` | the left hand onto the handle, against the right hand, wherever the wrists are close (`blender/twohand.py`), after the feet are planted |
+| `retarget.grip_metrics` | (not set) | the grip numbers in `anim/retarget.json` (`clips.<id>.grip`, every frame) on their own; on whenever any of the three above is |
+
+`character/hand_rig.json` (+ `.npz`) is made by `character/hands.py` (`python -m rybakina3d.character.hands --config
+<yaml>`); `r3d retarget` makes it first, on the machine running the stage, when any hand setting is on and the file is
+missing, older than `rigged.glb`, made with another `weld_m` or another `fingers.HAND_RIG_VERSION`, or left by a failed
+hand mesh export. Only such a fresh file is handed to Blender.
+
+The 5 s experiment's configs run one 5 s clip (a forehand, the run across, a backhand) through the whole pipeline in
+its own run folder: `configs/rybakina_5s.yaml` (extends `rybakina.yaml`, `run_dir: runs/rybakina_5s`,
+`select.source_span_s: [6.5, 8.5]`, `select.window_s.default: [1.5, 3.5]`); `configs/naomi_5s.yaml` (extends
+`naomi.yaml`, the same `run_dir`, the hand settings off: the A/B baseline); `configs/naomi_5s_grip.yaml` (the hand
+settings on, `run_dir: runs/rybakina_5s_grip`). The footage stages and the character do not depend on the clips, so
+`source/`, `shots.json`, `index/` and `character/` (and the variant's `variants/naomi/character/`) are copied from
+`runs/rybakina` into `runs/rybakina_5s` by hand and that run starts at `select`; `runs/rybakina_5s_grip` is a copy of
+it up to the motion (the same `motion.npz`) and runs only `retarget`. The 125-frame window is longer than
+`motion-paint`'s `VIDEO_MAX_FRAMES = 121`, so that stage is not run on it.
 
 ## Time and cost
 

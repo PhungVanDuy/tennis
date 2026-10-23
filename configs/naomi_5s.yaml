@@ -1,0 +1,9 @@
+# The Naomi variant (naomi.yaml) on the 5 s experiment's clip (rybakina_5s.yaml), with the hands as before them: the
+# A/B baseline of naomi_5s_grip.yaml.
+extends: naomi.yaml
+run_dir: runs/rybakina_5s
+
+retarget:
+  grip: fixed            # naomi.yaml switches the hand settings on; off here, so this job is the one from before them
+  fingers: false
+  left_hand_ik: false

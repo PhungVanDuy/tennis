@@ -285,3 +285,79 @@ def test_camera_ray_points_from_the_camera_to_the_player():
     want = Y_UP_TO_Z_UP @ (np.median(jw[:, 0], 0) - centre)
     want[2] = 0
     assert np.allclose(ray, want / np.linalg.norm(want), atol=1e-6) and abs(ray[1] + 1) < 0.01
+
+
+# ---------------------------------------------------------------------------------------------------- hands
+def _unit_rot(M: np.ndarray) -> np.ndarray:
+    return M[..., :3, :3] / np.linalg.norm(M[..., :3, :3], axis=-2, keepdims=True)
+
+
+def test_hand_offset_keeps_the_racket_aimed_and_moves_no_joint():
+    rng = np.random.default_rng(9)
+    L = 12
+    rig = _synthetic_rig()
+    mapping, _ = rt.map_bones(rig.names, rig.parents)
+    m = _motion(rng.normal(scale=0.4, size=(L, 3)), rng.normal(scale=0.3, size=(L, 63)))
+    plain = rt.retarget(rig, mapping, m, smooth_window=5)
+    # a seated racket turned by C about the wrist from the fixed grip's: the offset C in the hand's bone frame undoes it
+    hand = rig.index["RightHand"]
+    B = _unit_rot(rig.obj @ rig.rest[hand])
+    C = Rotation.from_rotvec([0.2, -0.3, 0.25]).as_matrix()
+    fixed = rt.grip_matrix(rig, mapping)
+    seat = fixed.copy()
+    seat[:3, :3] = C.T @ fixed[:3, :3]
+    turned = rt.retarget(rig, mapping, m, smooth_window=5, hand_offset=rt.matrix_to_quat(B.T @ C @ B))
+
+    def racket(res: dict, M: np.ndarray) -> np.ndarray:
+        return rig.obj @ res["pose"][:, hand] @ rt.racket_in_bone(rig, "RightHand", M)
+
+    assert np.allclose(_unit_rot(racket(turned, seat)), _unit_rot(racket(plain, fixed)), atol=1e-9)
+    assert np.allclose(turned["heads"], plain["heads"], atol=1e-12)
+    k = plain["animated"].index("RightHand")
+    rest_of = [i for i in range(len(plain["animated"])) if i != k]
+    assert np.array_equal(turned["quats"][:, rest_of], plain["quats"][:, rest_of])
+
+
+def test_finger_tracks_join_the_keys_and_fk_and_far_wrists_leave_the_arm():
+    L = 6
+    rig = _synthetic_rig()
+    mapping, _ = rt.map_bones(rig.names, rig.parents)
+    m = _motion(np.zeros((L, 3)), np.zeros((L, 63)))          # T-pose: the wrists 1.3 m apart
+    plain = rt.retarget(rig, mapping, m)
+    q = rt.matrix_to_quat(Rotation.from_rotvec([0.3, 0.1, -0.2]).as_matrix())
+    seen = {}
+
+    def tracks(n: int, left: np.ndarray) -> tuple[list[str], np.ndarray]:
+        seen["left"] = left
+        return ["head_end"], np.tile(q, (n, 1, 1))            # any unanimated bone stands in for a finger
+
+    racket = rt.racket_in_bone(rig, "RightHand", rt.grip_matrix(rig, mapping))
+    res = rt.retarget(rig, mapping, m, left_ik={"racket_in_hand": racket}, finger_tracks=tracks)
+    assert res["animated"] == plain["animated"] + ["head_end"]
+    assert res["quats"].shape == (L, len(plain["animated"]) + 1, 4)
+    assert np.allclose(seen["left"], 0) and np.allclose(res["left_weight"], 0) and res["left_ik"]["frames_on"] == 0
+    assert np.allclose(res["left_closed"], 0)
+    b = rig.index["head_end"]
+    assert np.allclose(res["pose"][:, b, :3, :3], plain["pose"][:, b, :3, :3] @ rt.quat_to_matrix(q))
+    others = [i for i in range(len(rig.names)) if i != b]
+    assert np.allclose(res["pose"][:, others], plain["pose"][:, others], atol=1e-9)
+    assert np.allclose(res["positions"], plain["positions"], atol=1e-6)
+
+
+def test_linear_blend_skin_blends_the_bones_like_blender():
+    # two bones up Z, the child from 1 m; an armature object scaled and moved; the child turned 90 deg about X
+    rest = np.tile(np.eye(4), (2, 1, 1))
+    rest[1, :3, 3] = [0.0, 0.0, 1.0]
+    obj = np.diag([2.0, 2.0, 2.0, 1.0])
+    obj[:3, 3] = [1.0, 0.0, 0.0]
+    rig = rt.Rig(["Root", "Child"], [-1, 0], rest, obj)
+    turn = np.eye(4)
+    turn[:3, :3] = Rotation.from_euler("x", 90, degrees=True).as_matrix()
+    pose = np.stack([rest, np.stack([rest[0], rest[1] @ turn])])             # frame 0 at rest, frame 1 turned
+    co = rig.world(np.array([[0.0, 0.0, 1.5], [0.0, 0.0, 1.5], [0.0, 0.0, 0.5]]))   # rest world positions
+    w = np.array([[0.0, 1.0], [0.5, 0.5], [1.0, 0.0]])
+    out = rt.linear_blend_skin(co, w, rig, pose)
+    assert out.shape == (2, 3, 3) and np.allclose(out[0], co)                # at rest: where they were
+    child = rig.world(np.array([0.0, -0.5, 1.0]))                            # 0.5 m up the child, turned to -Y
+    assert np.allclose(out[1, 0], child) and np.allclose(out[1, 1], (co[1] + child) / 2)
+    assert np.allclose(out[1, 2], co[2])                                     # on the root only: it stays

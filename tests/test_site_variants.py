@@ -265,3 +265,28 @@ def test_build_writes_variants_into_site_json(run_cfg, tmp_path):
     shutil.rmtree(run_cfg.run.root / "variants")
     d = json.loads((site.build(run_cfg) / "data" / "site.json").read_text())
     assert d["variants"] == [] and not (out / "media" / "variants").exists()
+
+
+def _notes_of(retarget: dict, joints: int = 24) -> dict:
+    """site._notes on a run with no clips yet: only the moveset's retarget.json and the rig's joints."""
+    from rybakina3d.config import PROJECT_ROOT
+
+    cfg = Config.load(PROJECT_ROOT / "configs" / "naomi.yaml")
+    d = {"clips": [], "character": {"rig": {"stats": {"joints": [f"Bone{i}" for i in range(joints)]}}},
+         "moveset": {"retarget": retarget, "url": "moveset.glb"}, "footage": {"shots": []}, "curation": None,
+         "qa_summary": None, "pipeline": [], "signature": None}
+    return site._notes(cfg, d)
+
+
+def test_notes_read_the_hands_off_retarget_json():
+    racket = {"bone": "RightHand", "length_m": 0.685, "grip_angle_deg": 25.0}
+    plain = _notes_of({"settings": {}, "racket": racket})
+    text = " ".join(plain["limitations"] + plain["next"])
+    assert "no fingers" in text and "Pin the left hand" in text and "25° grip" in text
+    hands = {"settings": {"grip": "palm", "fingers": True, "left_hand_ik": True}, "finger_bones": 30}
+    on = _notes_of({"settings": {}, "racket": {**racket, "grip": "palm", "grip_angle_deg": 41.0}, "hands": hands},
+                   joints=54)
+    text = " ".join(on["limitations"] + on["next"])
+    assert "The 30 finger bones" in text and "IK puts the left hand on the handle" in text
+    assert "seated on the palm, 41° across it" in text
+    assert "no fingers" not in text and "Pin the left hand" not in text and "not constrained" not in text

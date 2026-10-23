@@ -37,7 +37,7 @@ videos.
 | Moveset atlas | `artwork/rybakina_moveset_atlas.png`, 3840×2560: all 39 clips at contact, grouped by stroke, flagged clips marked |
 | Motion videos | 39 clip videos and a turntable, 1024×1024 at 25 fps (Cycles, 48 samples, about 59 min on one A100). The moveset reel `artwork/motion/rybakina_moveset_reel.mp4` is 1920×2114, a 5.2 s loop with all contacts aligned |
 | Painted motion | the full `motion-paint` run was still in progress when this was written (snapshot in [docs/artwork.md](docs/artwork.md#motion-paint)). During development, a smoke test on one forehand gave per-frame silhouette IoU median 0.96 (p10 0.90) and racket recall 1.0. **Placeholder, maintainer to replace from `artwork/motion/painted/paint.json` (`accepted`, `n`, `cost_usd`): N of 39 clips accepted, USD X.** The reel uses the render for every tile that has no accepted painted clip |
-| Naomi variant | `variants/naomi/anim/naomi_moveset.glb` (16.07 MB) and `.fbx` (21.82 MB): the same 39 animations on the art team's Naomi Osaka, built from their renders (front + three Sunburst views) by Hi3D v3.0 and Meshy's auto-rig, 280,416 triangles with the racket, 24 bones, vertices welded (840k → 140k) so knees bend as one skin, each knee's thigh/shin weight split re-centred on the joint (`retarget.leg_weights: band`: the auto-rig's handover sat about 5.5 cm below the joint behind the knee, so deep bends collapsed the back of the calf). Meshy 7.1 and Hunyuan3D 3.1 Pro were tried first ([docs/character.md](docs/character.md#5-a-character-drawn-by-the-art-team-the-naomi-variant)) |
+| Naomi variant | `variants/naomi/anim/naomi_moveset.glb` (17.41 MB) and `.fbx` (33.10 MB): the same 39 animations on the art team's Naomi Osaka, built from their renders (front + three Sunburst views) by Hi3D v3.0 and Meshy's auto-rig, 280,416 triangles with the racket, 54 bones (the auto-rig's 24 and 15 finger bones per hand: the racket seated on the palm, the left hand put on the handle by IK in two-handed strokes), vertices welded (840k → 140k) so knees bend as one skin, each knee's thigh/shin weight split re-centred on the joint (`retarget.leg_weights: band`: the auto-rig's handover sat about 5.5 cm below the joint behind the knee, so deep bends collapsed the back of the calf). Meshy 7.1 and Hunyuan3D 3.1 Pro were tried first ([docs/character.md](docs/character.md#5-a-character-drawn-by-the-art-team-the-naomi-variant)) |
 | Quest 3 set | render profile `quest3`: 2064×2208, 60 fps, 16 samples, H.264 High@5.2, CRF 16, render only. Naomi's Hi3D set is complete: 39 clips, 6,065 frames, rendered on one A100 by `DETACH=1 scripts/render_quest3.sh` in 10 batches of 4, 6 h 47 min from the first batch to the rebuilt site (2.56 s Cycles + 1.07 s matte a frame, 6.4 h of Blender time, encoding beside it). The 39 videos are 76.4 MB (0.92 to 3.01 MB each); the reel `variants/naomi/artwork/motion/naomi_moveset_reel_quest3.mp4` is 3.96 MB, a 5.2 s loop of all 39 clips. The `draft` profile (516×552, 16 samples) previews it. `quest3` and `draft` render with `smooth_skin` (dual-quaternion skinning + Corrective Smooth) |
 
 ## How it works
@@ -189,7 +189,10 @@ retargeted character. `artwork` runs `poses`, `remote artwork render`, `paint` a
 
 ```
 configs/rybakina.yaml        athlete, models, thresholds, quotas, GPU host root and Blender path
-configs/naomi.yaml           the Naomi variant: `extends: rybakina.yaml`, its own character settings
+configs/naomi.yaml           the Naomi variant: `extends: rybakina.yaml`, its own character settings, the hand settings
+configs/rybakina_5s.yaml     the 5 s experiment: one clip through the whole pipeline in runs/rybakina_5s
+configs/naomi_5s.yaml        the Naomi variant on that clip with the hands as before them (the A/B baseline)
+configs/naomi_5s_grip.yaml   the same with the hand settings on, in runs/rybakina_5s_grip
 src/rybakina3d/
   config.py                  typed config + RunLayout / ClipLayout (the on-disk contract between stages)
   cli.py                     `r3d`: one sub-command per stage, `r3d remote <stage>`
@@ -199,11 +202,13 @@ src/rybakina3d/
   selection.py clips.py tracking.py camera.py
   motion/                    recover.py (GVHMR), smpl.py (skeleton, joint indices, FK)
   curate.py qa.py signature.py
-  character/                 refs.py stylize.py mesh.py, art.py (art-team variants), face.py
+  character/                 refs.py stylize.py mesh.py, art.py (art-team variants), face.py,
+                             hands.py (finger rig and racket seat from the hand mesh)
   assemble.py                retarget driver: Blender job, check sheets, re-import gate
   artwork/                   layout.py (the sheet, render profiles) poses.py render.py paint.py compose.py
                              motion_render.py motion_paint.py motion_compose.py
   blender/                   retarget.py racket.py artwork.py artwork_motion.py face_project.py
+                             fingers.py (finger bones, palm seat) twohand.py (left hand on the racket)
                              (run inside Blender: bpy + numpy)
   site.py                    review site build + server
   gemini.py fal.py           hosted-model clients
@@ -231,10 +236,12 @@ and `body_models/`.
 - Feet are planted at retarget without heel/toe IK, so the lowest foot can dip about 3 cm into the court
   (5th percentile).
 - The racket is a rigid prop on `RightHand` that follows GVHMR's wrist; racket face and forearm roll are not
-  measured. On two-handed backhands the left hand is not constrained to the handle.
-- The Meshy auto-rig has 24 bones and no fingers or face controls. The grip is not articulated (the repaints
-  paint closed hands), and the sheet's four head close-ups are four angles, not four expressions. Hair and dress
-  are skinned, with no cloth or hair simulation. See [docs/character.md](docs/character.md).
+  measured. On Rybakina's two-handed backhands the left hand is not constrained to the handle.
+- The Meshy auto-rig has 24 bones and no fingers or face controls. On Rybakina the grip is not articulated (the
+  repaints paint closed hands), and the sheet's four head close-ups are four angles, not four expressions. Hair and
+  dress are skinned, with no cloth or hair simulation. Naomi's moveset (`configs/naomi.yaml`) adds 30 finger bones
+  and IKs the left hand onto the handle ([docs/character.md](docs/character.md#4-the-racket)); when it takes hold
+  is read from GVHMR's wrist distance, and the grip is one pose solved on the handle, not measured per stroke.
 - Repaints and painted videos depend on hosted models. A figure or clip that misses its silhouette check falls
   back to the render, and an endpoint can close: Kling v4 edit was closed to API callers on 2026-10-22.
   `models.video_paint` is Bernini-R, the model that kept the motion best in a smoke test, and `motion-paint` drives

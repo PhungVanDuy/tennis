@@ -265,6 +265,14 @@ def test_swing_speed_is_measured_around_the_contact():
     assert qa.gate(qa.clip_metrics(m, {"contact_index": 5}))[0] == "FAIL"
 
 
+def test_a_later_stroke_in_a_long_clip_is_not_this_ones_swing():
+    m = _motion(L=130, k=30)
+    m["joints_world"][:, 21, 0] += 0.8 * np.tanh((np.arange(130) - 85) / 2.0)   # a faster swing 2.2 s later
+    m["joints_camera"] = m["joints_world"] + [0, 0, 10.0]
+    t = qa.clip_metrics(m, {"contact_index": 30})["timing"]
+    assert t["peak_frame"] == 30 and t["offset_frames"] == 0
+
+
 def test_pose_jitter_ignores_the_root():
     m = _motion()
     m["joints_world"] = m["joints_world"] + np.random.default_rng(3).normal(0, 0.05, (50, 1, 3))  # root noise

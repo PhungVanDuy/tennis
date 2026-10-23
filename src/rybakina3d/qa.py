@@ -84,6 +84,10 @@ PCK_MIN = (0.85, 0.65)
 # |peak wrist speed - contact| in frames (25 fps: 3 = 120 ms, 8 = 320 ms). The racket wrist is fastest
 # within ~1-2 frames of contact; far off means the swing or the contact label is wrong.
 TIMING_FRAMES = (3, 8)
+# The wrist peak (and a serve's wrist apex) is looked for within this many seconds of the contact: a long clip
+# can hold more of her strokes (the 5 s clip's forehand and backhand are 2.3 s apart), and the next stroke's
+# swing is not this one's.
+PEAK_SEARCH_S = 1.0
 # Peak hitting-wrist speed relative to the pelvis within TIMING_FRAMES[1] of the contact, m/s (higher is
 # better). This run's real strokes reach 3.5 (slice) to 8; below 2 the player waits while the opponent hits,
 # the contact label is far from her swing, or GVHMR barely moved the arm (a scrambled defensive shot).
@@ -327,13 +331,14 @@ def clip_metrics(m, meta: dict, track=None, anim=None, handedness: str = "right"
         # relative to the pelvis: the root's depth noise would otherwise dominate the wrist speed
         w = WRISTS.get(handedness, WRISTS["right"])
         v = speed(rel[:, w], fps)
-        f = int(np.argmax(v))
+        lo, hi = max(0, k - round(PEAK_SEARCH_S * fps)), k + round(PEAK_SEARCH_S * fps) + 1
+        f = lo + int(np.argmax(v[lo:hi]))
         near = v[max(0, k - TIMING_FRAMES[1]): k + TIMING_FRAMES[1] + 1]
         q["timing"].update(peak_frame=f, offset_frames=f - k, offset_s=_num((f - k) / fps, 3),
                            peak_wrist_speed_ms=_num(v[f], 2), swing_speed_ms=_num(near.max(), 2),
                            audio_offset_frames=f - audio_k)
         if stroke in OVERHEAD:
-            q["timing"]["apex_offset_frames"] = int(np.argmax(rel[:, w, 1])) - k
+            q["timing"]["apex_offset_frames"] = lo + int(np.argmax(rel[lo:hi, w, 1])) - k
 
     q["tracking"] = {"coverage": _num(track["coverage"], 3) if track is not None else None}
     q["camera"] = {

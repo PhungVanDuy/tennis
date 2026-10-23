@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "rybakina.yaml"
@@ -64,6 +64,8 @@ class Select(BaseModel):
     min_quality: int = 3
     oversample: float = 2.0  # candidates per kept clip; `curate` rejects mislabelled ones
     onset_search_s: float = 0.5
+    # only strokes whose contact (Gemini's time) lies in this stretch of the source, seconds; None = the whole video
+    source_span_s: tuple[float, float] | None = None
 
     def window(self, stroke: str) -> tuple[float, float]:
         return self.window_s.get(stroke, self.window_s["default"])
@@ -114,6 +116,25 @@ class Retarget(BaseModel):
     # "band" = each knee's thigh/shin split centred on the joint, knee_band_cm either side
     leg_weights: Literal["meshy", "band"] = "meshy"
     knee_band_cm: float = Field(5.0, gt=0)
+    # hands (character/hand_rig.json, made by character/hands.py from the rig's own hand mesh): "fixed" = the racket
+    # at attach_racket's fixed offsets; "palm" = seated on the palm skin, butt at the heel of the hand, and a constant
+    # right-hand offset that keeps the racket aimed as with "fixed" (blender/fingers.py seat_frame)
+    grip: Literal["fixed", "palm"] = "fixed"
+    fingers: bool = False             # 15 finger bones per hand: the right hand keyed in its grip, the left relaxed
+                                      # or, with left_hand_ik, closed as far as the IK holds it on the handle
+    left_hand_ik: bool = False        # left hand onto the handle where the wrists are close (blender/twohand.py)
+    grip_metrics: bool = False        # the grip numbers in retarget.json on their own (on whenever any of the above is)
+
+    @model_validator(mode="after")
+    def _fingers_need_the_palm_seat(self) -> Retarget:
+        if self.fingers and self.grip != "palm":   # the grip was solved on the seat, not the fixed grip's buried handle
+            raise ValueError("retarget.fingers needs retarget.grip: palm")
+        return self
+
+    @property
+    def hands(self) -> bool:
+        """Whether any hand setting is on (the job then carries hand_rig.json and the grip metrics)."""
+        return self.grip != "fixed" or self.fingers or self.left_hand_ik or self.grip_metrics
 
 
 class Site(BaseModel):
@@ -260,6 +281,7 @@ class RunLayout:
     mesh_dir = property(lambda s: s.out / "character" / "mesh")
     mesh_report = property(lambda s: s.out / "character" / "mesh" / "mesh.json")
     rig = property(lambda s: s.out / "character" / "rigged.glb")
+    hand_rig = property(lambda s: s.out / "character" / "hand_rig.json")   # + hand_rig.npz (character/hands.py)
     character_report = property(lambda s: s.out / "character" / "character.json")
 
     # assembly + review

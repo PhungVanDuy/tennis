@@ -52,3 +52,11 @@ def test_verify_problems_catch_a_misplaced_racket_and_a_bad_replay():
                          "b": {"frames": 81, "joint_error_mm": 4.0}}}
     problems = assemble.verify_problems(bad, report, ["a", "b"])
     assert len(problems) == 3 and "racket" in problems[0] and "57 frames" in problems[1]
+    # with finger bones built, the export must carry them and their keys in every clip
+    hands = {**report, "hands": {"finger_bones": 30}}
+    kept = {**good, "glb_finger_bones": 30, "glb_finger_keys": {"a": 30, "b": 30}, "fbx_finger_bones": 30}
+    assert assemble.verify_problems(kept, hands, ["a", "b"]) == []
+    assert assemble.verify_problems(good, report, ["a", "b"]) == []        # no fingers: nothing asked
+    lost = {**kept, "glb_finger_bones": 0, "glb_finger_keys": {"a": 0, "b": 30}, "fbx_finger_bones": 28}
+    problems = assemble.verify_problems(lost, hands, ["a", "b"])
+    assert len(problems) == 3 and "0 finger bones in the GLB" in problems[0] and problems[1].startswith("a: 0 of 30")

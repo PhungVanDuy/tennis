@@ -11,6 +11,11 @@ preview.mp4 frame: anim/checks/<id>_<frame>.jpg.
 
 The moveset holds every clip `curate` kept that has a usable motion.npz; `--clip` only limits the
 check renders.
+
+The hand settings (config.Retarget grip / fingers / left_hand_ik / grip_metrics) reach the job only when switched
+on. They use character/hand_rig.json (the palm seat and the fingers need it, the two-hand IK takes its left palm from
+it), which is made first where it is missing or stale (character/hands.py, on the machine running this stage);
+retarget.json then records the grip metrics per clip.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .blender import SCRIPTS_DIR
+from .blender import SCRIPTS_DIR, fingers
 from .config import Config, RunLayout
 from .gltf import glb_stats
 from .media import read_frame
@@ -228,6 +233,15 @@ def verify_problems(verify: dict, report: dict, expected: list[str]) -> list[str
             problems.append(f"{cid}: GLB replays its joint track {c['joint_error_mm']} mm off")
         if c.get("racket_drift_mm", 0.0) > DRIFT_TOL_MM:
             problems.append(f"{cid}: racket drifts {c['racket_drift_mm']} mm on the hand")
+    built = (report.get("hands") or {}).get("finger_bones", 0)
+    if built:  # the finger bones and their keys must survive the export, or the hands play open
+        if verify.get("glb_finger_bones") != built:
+            problems.append(f"{verify.get('glb_finger_bones')} finger bones in the GLB, {built} built")
+        for cid, n in (verify.get("glb_finger_keys") or {}).items():
+            if n != built:
+                problems.append(f"{cid}: {n} of {built} finger bones animated in the GLB")
+        if "fbx_finger_bones" in verify and verify["fbx_finger_bones"] != built:
+            problems.append(f"{verify['fbx_finger_bones']} finger bones in the FBX, {built} built")
     return problems
 
 
@@ -235,6 +249,71 @@ def leg_settings(cfg: Config) -> dict:
     """The job settings of retarget.leg_weights (none for "meshy", so such a job is the one from before it)."""
     r = cfg.retarget
     return {"leg_weights": r.leg_weights, "knee_band_cm": r.knee_band_cm} if r.leg_weights == "band" else {}
+
+
+def hand_settings(cfg: Config) -> dict:
+    """The job settings of retarget.grip / fingers / left_hand_ik / grip_metrics (none while all are off, so such a
+    job is the one from before them), with the path of character/hand_rig.json when it is fresh (hand_rig_fresh), and
+    that path relative to the run root for the report."""
+    r = cfg.retarget
+    if not r.hands:
+        return {}
+    out = {"grip": r.grip, "fingers": r.fingers, "left_hand_ik": r.left_hand_ik, "grip_metrics": True}
+    if hand_rig_fresh(cfg):   # the path for Blender; the label (relative to the run) for retarget.json
+        out["hand_rig"] = str(cfg.run.hand_rig)
+        out["hand_rig_label"] = str(cfg.run.hand_rig.relative_to(cfg.run.root))
+    return out
+
+
+def hand_rig_fresh(cfg: Config) -> bool:
+    """Whether character/hand_rig.json fits the run as it is: this format (fingers.HAND_RIG_VERSION), not older than
+    rigged.glb, made with the job's weld_m, and not a failed hand mesh export (Blender missing or crashing then)."""
+    path, rig = cfg.run.hand_rig, cfg.run.rig
+    if not (path.exists() and rig.exists()) or path.stat().st_mtime < rig.stat().st_mtime:
+        return False
+    data = read_json(path)
+    return data.get("version") == fingers.HAND_RIG_VERSION and data.get("weld_m") == cfg.retarget.weld_m \
+        and not str(data.get("reason") or "").startswith("hand mesh export failed")
+
+
+def ensure_hand_rig(cfg: Config) -> Path | None:
+    """character/hand_rig.json for the hand settings, (re)made by character/hands.py unless it is fresh
+    (hand_rig_fresh). None when every hand setting is off."""
+    r, run_ = cfg.retarget, cfg.run
+    if not r.hands:
+        return None
+    path = run_.hand_rig
+    if hand_rig_fresh(cfg):
+        return path
+    from .character import hands  # scipy: only when a hand setting is on
+
+    binary = blender_binary(cfg)
+    hands.make(run_.rig, path, r.weld_m, binary if shutil.which(binary) else None,
+               label=str(run_.rig.relative_to(run_.root)))
+    return path
+
+
+def make_job(cfg: Config, clips: list[dict], fps: float) -> dict:
+    """The Blender job for these clips (_clips rows) at the motion rate fps; reads and writes nothing."""
+    run_ = cfg.run
+    preview_h = cfg.clips.preview_height
+    size = clips[0]["clip_size"]
+    return {
+        "rig": str(run_.rig),
+        "fps": fps,
+        "settings": {"smooth_window": cfg.retarget.smooth_window,
+                     "ground_from_contacts": cfg.retarget.ground_from_contacts, "foot_lock": FOOT_LOCK,
+                     "racket": True, "weld_m": cfg.retarget.weld_m,
+                     "smooth_limb_weights": cfg.retarget.smooth_limb_weights,
+                     **({"racket_colors": cfg.character.racket_colors} if cfg.character.racket_colors else {}),
+                     **leg_settings(cfg), **hand_settings(cfg)},
+        "render": {"width": int(round(size[0] * preview_h / size[1] / 2) * 2), "height": preview_h},
+        "clips": clips,
+        "out": {"glb": str(run_.moveset_glb), "fbx": str(run_.moveset_fbx),
+                "report": str(run_.retarget_report), "joints_dir": str(run_.joints_dir),
+                "checks_raw": str(run_.checks_dir / "raw"), "verify": str(run_.anim_dir / "verify.json"),
+                "blend": str(run_.moveset_blend) if SAVE_BLEND else None},
+    }
 
 
 def run(cfg: Config, only: list[str] | None = None) -> dict:
@@ -245,6 +324,7 @@ def run(cfg: Config, only: list[str] | None = None) -> dict:
     if not clips:
         log("[yellow]no clip has a usable motion.npz yet; nothing to retarget[/]")
         return {}
+    ensure_hand_rig(cfg)
     unknown = sorted(set(only or ()) - {c["id"] for c in clips})
     if unknown:
         log(f"[yellow]--clip {unknown}: no such clip with motion[/]")
@@ -253,25 +333,7 @@ def run(cfg: Config, only: list[str] | None = None) -> dict:
     run_.ensure(anim, checks_dir)
     _clean(run_, clips)
 
-    preview_h = cfg.clips.preview_height
-    size = clips[0]["clip_size"]
-    fps = float(np.load(clips[0]["motion"])["fps"])
-    job = {
-        "rig": str(run_.rig),
-        "fps": fps,
-        "settings": {"smooth_window": cfg.retarget.smooth_window,
-                     "ground_from_contacts": cfg.retarget.ground_from_contacts, "foot_lock": FOOT_LOCK,
-                     "racket": True, "weld_m": cfg.retarget.weld_m,
-                     "smooth_limb_weights": cfg.retarget.smooth_limb_weights,
-                     **({"racket_colors": cfg.character.racket_colors} if cfg.character.racket_colors else {}),
-                     **leg_settings(cfg)},
-        "render": {"width": int(round(size[0] * preview_h / size[1] / 2) * 2), "height": preview_h},
-        "clips": clips,
-        "out": {"glb": str(run_.moveset_glb), "fbx": str(run_.moveset_fbx),
-                "report": str(run_.retarget_report), "joints_dir": str(run_.joints_dir),
-                "checks_raw": str(checks_dir / "raw"), "verify": str(anim / "verify.json"),
-                "blend": str(run_.moveset_blend) if SAVE_BLEND else None},
-    }
+    job = make_job(cfg, clips, float(np.load(clips[0]["motion"])["fps"]))
     job_path = write_json(anim / "job.json", job)
     log_path = anim / "blender.log"
     log_path.unlink(missing_ok=True)

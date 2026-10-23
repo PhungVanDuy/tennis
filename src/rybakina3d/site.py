@@ -1194,18 +1194,29 @@ def _notes(cfg: Config, d: dict) -> dict:
     else:
         nxt.append("Plant the feet at retarget from GVHMR's contact probabilities.")
 
-    # hands and racket
+    # hands and racket (retarget.json's "hands": the moveset's own finger bones and left-hand IK, when switched on)
     joints = (ch["rig"]["stats"] or {}).get("joints", [])
-    fingers = any(w in j.lower() for j in joints for w in ("finger", "thumb", "index"))
+    hands = rt.get("hands") or {}
+    finger_bones = int(hands.get("finger_bones") or 0)
+    fingers = finger_bones > 0 or any(w in j.lower() for j in joints for w in ("finger", "thumb", "index"))
+    left_ik = bool((hands.get("settings") or {}).get("left_hand_ik"))
     if racket:
+        grip = (f"seated on the palm, {racket.get('grip_angle_deg', 0):.0f}° across it" if racket.get("grip") == "palm"
+                else f"{racket.get('grip_angle_deg', 0):.0f}° grip")
         lim.append(f"The racket is a rigid prop on {racket.get('bone', 'the hand')} "
-                   f"({racket.get('length_m', 0) * 100:.1f} cm, {racket.get('grip_angle_deg', 0):.0f}° grip): it "
+                   f"({racket.get('length_m', 0) * 100:.1f} cm, {grip}): it "
                    "follows GVHMR's wrist, so the racket face and forearm roll are not measured from the footage.")
     if joints and not fingers:
         lim.append(f"The Meshy auto-rig has {len(joints)} bones and no fingers: the grip is not articulated.")
-    if cfg.athlete.backhand == "two_handed" and racket:
+    elif finger_bones:
+        lim.append(f"The {finger_bones} finger bones added to the auto-rig hold one grip solved on the handle (the "
+                   "left hand closes it where it holds the racket): the grip is not measured per stroke.")
+    if cfg.athlete.backhand == "two_handed" and racket and not left_ik:
         lim.append("Two-handed backhand: the left hand follows GVHMR's left wrist and is not constrained to the "
                    "handle, so it can sit off the racket.")
+    elif cfg.athlete.backhand == "two_handed" and racket:
+        lim.append("Two-handed backhand: IK puts the left hand on the handle wherever the wrists are close; when it "
+                   "takes hold is read from GVHMR's wrist distance, not seen in the footage.")
     lim.append("Hair, ponytail and dress are skinned to the body (no cloth or hair simulation).")
 
     # QA of what ships
@@ -1231,7 +1242,7 @@ def _notes(cfg: Config, d: dict) -> dict:
         nxt.append(f"Re-run GVHMR on the court calibration of {len(unused)} clips, then retarget and QA.")
     if joints and not fingers:
         nxt.append("Add finger bones (or a hand rig) so the grip can be posed per stroke.")
-    if cfg.athlete.backhand == "two_handed" and racket:
+    if cfg.athlete.backhand == "two_handed" and racket and not left_ik:
         nxt.append("Pin the left hand to the handle with IK on two-handed backhands.")
     if racket:
         nxt.append("Track the racket in the footage to drive the racket face instead of following the wrist.")

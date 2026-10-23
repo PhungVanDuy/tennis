@@ -169,7 +169,9 @@ Code: `src/rybakina3d/selection.py`. Command: `.venv/bin/r3d select [--force]`.
 **1. Candidates.** A shot qualifies when its `view` is in `select.allowed_views`, it is not a replay, not
 slow motion (unless `select.allow_slow_motion`), `rybakina_side` is `near` or `solo`, `full_body` is true
 and `quality >= select.min_quality`. Every event in it with `hitter == "rybakina"` and a type listed in
-`select.strokes` is a candidate.
+`select.strokes` is a candidate. With `select.source_span_s: [a, b]` only events whose Gemini time lies in
+[a, b] seconds of the source are candidates (default `None`: the whole video; `configs/rybakina_5s.yaml`
+uses it).
 
 **2. Contact on the audio.** `Onsets` computes a spectral-flux onset envelope with librosa
 (`hop_length=160` at 16 kHz = 10 ms, `n_fft=512`, `n_mels=40`, `fmin=1500` Hz: ball strikes sit above the
@@ -210,6 +212,7 @@ stricter judge of the label than Gemini, and `curate` decides later.
 | `select.allow_slow_motion` | false |
 | `select.min_quality` | 3 |
 | `select.onset_search_s` | 0.5 |
+| `select.source_span_s` | `None` (the whole video) |
 
 - **Limitations:** the onset can lock onto the opponent's strike or a nearby bounce; offsets of 9 to 14
   frames were seen and are what `curate`'s search radius is sized for. Strokes of hers in far-court,
@@ -454,7 +457,7 @@ Code: `src/rybakina3d/qa.py` (pure numpy; runs on either machine). Command: `.ve
 | ground | sole height = foot joint height minus its rest height above the sole (`SOLE_OFFSET_M`: left/right ankle 0.071 / 0.063 m, feet 0.015 / 0.017 m); penetration below y = 0, floating while planted, the ground offset (median planted sole height) and the penetration left after re-grounding on that offset |
 | jitter | mean norm of the third finite difference (m/s^3): all joints, wrists, the root alone, the pose relative to the root; plus the share of the root's jerk along the camera ray |
 | reprojection | `joints_camera` projected with `K` against ViTPose keypoints with confidence > `KP_CONF`: median px, median / box height, PCK at `PCK_ALPHA` of the box height, per arms and legs. GVHMR is fitted to these same keypoints, so this checks consistency, not accuracy |
-| timing | frame of peak pelvis-relative hitting-wrist speed minus the contact frame; `swing_speed_ms` = peak within `TIMING_FRAMES[1]` frames of contact; for serves the wrist apex offset as a second marker |
+| timing | frame of peak pelvis-relative hitting-wrist speed minus the contact frame; `swing_speed_ms` = peak within `TIMING_FRAMES[1]` frames of contact; for serves the wrist apex offset as a second marker. The peak (and a serve's wrist apex) is searched within `PEAK_SEARCH_S = 1.0` s of the contact, so a later stroke in a long clip is not taken for this one |
 | tracking | `track.npz` coverage |
 | camera | static, background motion, calibrated |
 | retarget | skate of the character's feet (`anim/joints/<id>.npz`) on the same planted frames, per source frame; jitter of its root and of its pose relative to the root |
@@ -475,7 +478,7 @@ Code: `src/rybakina3d/qa.py` (pure numpy; runs on either machine). Command: `.ve
 | PCK@0.1 | `PCK_MIN` | < 0.85 | < 0.65 |
 | no confident 2D keypoints | | warn | |
 | swing speed within 8 frames of contact | `SWING_MIN_MS` | < 3.0 m/s | < 2.0 m/s |
-| peak wrist speed offset from contact | `TIMING_FRAMES` | > 3 frames | > 8 frames |
+| peak wrist speed offset from contact (peak searched within `PEAK_SEARCH_S`) | `TIMING_FRAMES` | > 3 frames | > 8 frames |
 | track coverage | `track.min_coverage`, `COVERAGE_FAIL` | < 0.7 | < 0.5 |
 | uncalibrated moving camera with background motion | `CAMERA_MOTION_WARN_PX = 8.0` | warn only | |
 | retargeted skate mean / p95 | `SKATE_MEAN_CM`, `SKATE_P95_CM` | as above, on the full skate | |
@@ -559,7 +562,9 @@ serve's jump needs room, while on groundstrokes GVHMR's root height is mostly de
 **Racket.** A procedural low-poly racket (`racket.py`: 68.5 cm long, 33 x 26 cm head, 416 triangles) is
 parented to the right-hand bone in an eastern forehand grip, placed at rest: `GRIP_ANGLE_DEG = 25`
 (shaft from the hand's long axis towards the thumb), `PALM_OFFSET_M = 0.075` (wrist to palm centre),
-`PALM_DEPTH_M = 0.015`, `GRIP_FROM_BUTT_M = 0.07`.
+`PALM_DEPTH_M = 0.015`, `GRIP_FROM_BUTT_M = 0.07`. The hand settings `retarget.grip`, `retarget.fingers` and
+`retarget.left_hand_ik` (off by default) replace this with a seat on the palm from `character/hand_rig.json`, finger
+bones and the left hand on the handle, and record grip metrics per clip ([character.md](character.md#4-the-racket)).
 
 **Export.** One action per clip, named by the clip id, stored on muted NLA tracks so the rest pose stays
 clean. GLB: all actions, sampled every frame, Y up, rest-position armature. FBX: every action baked, no
@@ -581,8 +586,10 @@ character from the same camera | overlay at OVERLAY_ALPHA = 0.6 | side view]`, `
 
 - **Limitations:** no heel/toe IK: planted feet are pinned through the root only, and the lowest foot may
   dip up to 3 cm into the court by design. The racket is a rigid prop that follows GVHMR's wrist; racket
-  face and forearm roll are not measured from the footage. The rig has no finger bones, so the grip is not
-  articulated, and on two-handed backhands the left hand is not constrained to the handle. Every clip
+  face and forearm roll are not measured from the footage. Rybakina's rig has no finger bones, so the grip is
+  not articulated, and on two-handed backhands the left hand is not constrained to the handle. Naomi's
+  moveset (`configs/naomi.yaml`) adds 30 finger bones and puts the left hand on the handle by IK
+  ([character.md](character.md#4-the-racket)). Every clip
   starts at the origin facing the same way; court position and the transitions between strokes are not
   part of the moveset.
 

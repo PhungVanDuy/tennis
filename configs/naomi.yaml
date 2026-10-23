@@ -22,3 +22,6 @@ retarget:                                    # the auto-rig's knees fold at the 
   smooth_limb_weights: 20
   leg_weights: band                          # each knee's thigh/shin split centred on the joint (blender/retarget.py)
   knee_band_cm: 5.0                          # band half-width
+  grip: palm                                 # handle on the palm skin, butt at the heel; the racket aimed as before
+  fingers: true                              # 15 finger bones per hand from character/hand_rig.json (character/hands.py)
+  left_hand_ik: true                         # left palm onto the handle where the wrists are close (blender/twohand.py)

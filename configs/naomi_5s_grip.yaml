@@ -1,0 +1,9 @@
+# The Naomi 5 s clip (naomi_5s.yaml) with the hands fixed, in its own run folder so the current render stays for A/B:
+# the racket seated on the palm, finger bones closed on the handle, the left hand on it in two-handed strokes.
+extends: naomi_5s.yaml
+run_dir: runs/rybakina_5s_grip
+
+retarget:
+  grip: palm             # handle on the palm skin, butt at the heel; the racket stays aimed as before (fingers.py)
+  fingers: true          # 15 finger bones per hand from character/hand_rig.json (character/hands.py)
+  left_hand_ik: true     # left palm onto the handle where the wrists are close (blender/twohand.py)

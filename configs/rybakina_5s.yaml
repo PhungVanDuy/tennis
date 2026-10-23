@@ -1,0 +1,10 @@
+# Experiment: one 5 s clip (a forehand, the run across, a backhand) through the whole pipeline, in its own run
+# folder. The footage stages (ingest, shots, index) and the character do not depend on the clips: their outputs
+# are copied from runs/rybakina instead of being made again.
+extends: rybakina.yaml
+run_dir: runs/rybakina_5s
+
+select:
+  source_span_s: [6.5, 8.5]   # only the forehand at 0:07 (shot 0, the low camera behind the baseline)
+  window_s:
+    default: [1.5, 3.5]       # 5 s: the preparation, the forehand, the run across, the backhand, the recovery

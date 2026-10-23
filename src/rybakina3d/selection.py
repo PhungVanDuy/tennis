@@ -78,6 +78,8 @@ def _candidates(cfg: Config, index: dict) -> list[Candidate]:
         for e in s["events"]:
             if e["hitter"] != "rybakina" or e["type"] not in sel.strokes:
                 continue
+            if sel.source_span_s and not sel.source_span_s[0] <= e["t"] <= sel.source_span_s[1]:
+                continue
             out.append(Candidate(s["shot_id"], e["type"], e["t"], e["confidence"], s["view"], s["rybakina_side"],
                                  s["quality"], s["outfit"], s["start_frame"], s["end_frame"]))
     return out
