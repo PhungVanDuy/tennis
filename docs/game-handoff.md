@@ -10,7 +10,7 @@ This document is for handing Naomi's moveset (`configs/naomi.yaml`, see [charact
 | `anim/naomi_moveset.fbx` | 33.10 MB | binary FBX 7.4 of the same scene: every action baked, no leaf bones, textures embedded, `-Z` forward, `Y` up |
 | `anim/retarget.json` | 0.20 MB | the build report: the bone mapping, the racket seat, the skin fixes, and per clip `fps`, `frames`, `contact_index`, the foot planting and the hand metrics |
 | `anim/verify.json` | 0.01 MB | the re-import check in a fresh Blender: action names, joint replay error, the racket's parent and drift, the finger bones in the GLB and the FBX |
-| `artwork/motion/render_quest3/<clip>.mp4` | 0.92 to 3.01 MB each (the set rendered before the hands) | previews only: one camera, one eye, render only ([artwork.md](artwork.md#4-render-profiles-the-quest-3-set)) |
+| `artwork/motion/render_quest3/<clip>.mp4` | 0.91 to 2.99 MB each, rendered with the hands | previews only: one camera, one eye, render only ([artwork.md](artwork.md#4-render-profiles-the-quest-3-set)) |
 
 The GLB's 17.41 MB are 10.97 MB of mesh data, 3.51 MB of textures, 1.55 MB of animation and 1.37 MB of glTF JSON. The animations are the small part: what makes the files heavy is the mesh and its maps.
 

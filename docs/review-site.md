@@ -25,7 +25,7 @@ runs/rybakina/site/
 
 | Content | Copied or linked | How |
 |---|---|---|
-| Front-end files from `web/` | copied (`_copy_web`) | `shutil.copy2` on every build; files in `site/` that `web/` no longer has are deleted, except under `data/` and `media/` |
+| Front-end files from `web/` | copied (`_copy_web`) | `shutil.copy2` on every build; files in `site/` that `web/` no longer has are deleted, except under `data/` and `media/`. So is any other plain file put in `site/` by hand; a folder added by hand survives only as a symlink to a folder outside `site/` (the build does not walk into it) |
 | `data/site.json` | generated | aggregated from every stage's reports (next section) |
 | `data/motion/<clip>.json` | generated | `{fps, n, contact_index, parents, joints}`: the 24 SMPL joints of `motion.npz` (`joints_world`), rounded to millimetres; files of clips that are gone are deleted after the new ones are written |
 | Every image, video and model the page shows | symlinked (`_Linker`) | `media/<rel>` → a **relative** link to the file in the run folder |
